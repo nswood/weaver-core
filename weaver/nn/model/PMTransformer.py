@@ -371,93 +371,11 @@ class PairEmbed(nn.Module):
             y = elements.view(-1, self.out_dim, seq_len, seq_len)
         return y
 
-
-class Block(nn.Module):
-    def __init__(self, embed_dim=128, num_heads=8, ffn_ratio=4,
-                 dropout=0.1, attn_dropout=0.1, activation_dropout=0.1,
-                 add_bias_kv=False, activation='gelu',
-                 scale_fc=True, scale_attn=True, scale_heads=True, scale_resids=True):
-        super().__init__()
-
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
-        self.ffn_dim = embed_dim * ffn_ratio
-
-        self.pre_attn_norm = nn.LayerNorm(embed_dim)
-        self.attn = nn.MultiheadAttention(
-            embed_dim,
-            num_heads,
-            dropout=attn_dropout,
-            add_bias_kv=add_bias_kv,
-        )
-        self.post_attn_norm = nn.LayerNorm(embed_dim) if scale_attn else None
-        self.dropout = nn.Dropout(dropout)
-
-        self.pre_fc_norm = nn.LayerNorm(embed_dim)
-        self.fc1 = nn.Linear(embed_dim, self.ffn_dim)
-        self.act = nn.GELU() if activation == 'gelu' else nn.ReLU()
-        self.act_dropout = nn.Dropout(activation_dropout)
-        self.post_fc_norm = nn.LayerNorm(self.ffn_dim) if scale_fc else None
-        self.fc2 = nn.Linear(self.ffn_dim, embed_dim)
-
-        self.c_attn = nn.Parameter(torch.ones(num_heads), requires_grad=True) if scale_heads else None
-        self.w_resid = nn.Parameter(torch.ones(embed_dim), requires_grad=True) if scale_resids else None
-
-    def forward(self, x, x_cls=None, padding_mask=None, attn_mask=None):
-        """
-        Args:
-            x (Tensor): input to the layer of shape `(seq_len, batch, embed_dim)`
-            x_cls (Tensor, optional): class token input to the layer of shape `(1, batch, embed_dim)`
-            padding_mask (ByteTensor, optional): binary
-                ByteTensor of shape `(batch, seq_len)` where padding
-                elements are indicated by ``1``.
-
-        Returns:
-            encoded output of shape `(seq_len, batch, embed_dim)`
-        """
-
-        if x_cls is not None:
-            with torch.no_grad():
-                # prepend one element for x_cls: -> (batch, 1+seq_len)
-                padding_mask = torch.cat((torch.zeros_like(padding_mask[:, :1]), padding_mask), dim=1)
-            # class attention: https://arxiv.org/pdf/2103.17239.pdf
-            residual = x_cls
-            u = torch.cat((x_cls, x), dim=0)  # (seq_len+1, batch, embed_dim)
-            u = self.pre_attn_norm(u)
-            x = self.attn(x_cls, u, u, key_padding_mask=padding_mask)[0]  # (1, batch, embed_dim)
-        else:
-            residual = x
-            x = self.pre_attn_norm(x)
-            x = self.attn(x, x, x, key_padding_mask=padding_mask,
-                          attn_mask=attn_mask)[0]  # (seq_len, batch, embed_dim)
-
-        if self.c_attn is not None:
-            tgt_len = x.size(0)
-            x = x.view(tgt_len, -1, self.num_heads, self.head_dim)
-            x = torch.einsum('tbhd,h->tbdh', x, self.c_attn)
-            x = x.reshape(tgt_len, -1, self.embed_dim)
-        if self.post_attn_norm is not None:
-            x = self.post_attn_norm(x)
-        x = self.dropout(x)
-        x += residual
-
-        residual = x
-        x = self.pre_fc_norm(x)
-        x = self.act(self.fc1(x))
-        x = self.act_dropout(x)
-        if self.post_fc_norm is not None:
-            x = self.post_fc_norm(x)
-        x = self.fc2(x)
-        x = self.dropout(x)
-        if self.w_resid is not None:
-            residual = torch.mul(self.w_resid, residual)
-        x += residual
-
-        return x
-
 # Import PM layers
-from mixed_learning_utils import *
+import os
+os.environ['PYTHONPATH'] = '/n/home11/nswood/weaver-core/weaver/nn/model'
+
+from .PM_utils import *
 
 class PMBlock(nn.Module):
     def __init__(self,manifolds, embed_dim=128, num_heads=8, ffn_ratio=4,
@@ -479,28 +397,46 @@ class PMBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.act = nn.GELU() if activation == 'gelu' else nn.ReLU()
         self.act_dropout = nn.Dropout(activation_dropout)
-
+        
+        
+        
+        self.pre_attn_norm = nn.ModuleList()
+        
+        self.pre_fc_norm = nn.ModuleList()
+        
+        if scale_attn:
+            self.post_attn_norm = nn.ModuleList()
+        if scale_fc:
+            self.post_fc_norm = nn.ModuleList()
+        
         self.fc1 = nn.ModuleList()
         self.fc2 = nn.ModuleList()
         self.attn = nn.ModuleList()
-        self.c_attn =nn.ModuleList() if scale_heads else None
-        self.w_resid = nn.ModuleList() if scale_resids else None
+        self.c_attn =nn.ParameterList() if scale_heads else None
+        self.w_resid = nn.ParameterList() if scale_resids else None
         if self.n_man > 1:
             self.w_man_att = nn.ModuleList() if man_att else None
-            slef.theta_man_att = nn.ModuleList() if man_att else None
+            self.theta_man_att = nn.ModuleList() if man_att else None
         
         for man in manifolds:
-            self.fc1.append(ManifoldLinear(embed_dim, self.ffn_dim,ball = man))
-            self.fc2.append(ManifoldLinear(self.ffn_dim, embed_dim,ball = man))
-            self.attn.append(ManifoldMHA(embed_dim,num_heads,dropout=attn_dropout,add_bias_kv=add_bias_kv, ball = man))
+            self.fc1.append(Manifold_Linear(embed_dim, self.ffn_dim,ball = man))
+            self.fc2.append(Manifold_Linear(self.ffn_dim, embed_dim,ball = man))
+            self.attn.append(ManifoldMHA(embed_dim,num_heads,dropout=attn_dropout, ball = man))
             if scale_heads:
                 self.c_attn.append(nn.Parameter(torch.ones(num_heads), requires_grad=True))
             if scale_resids:
                 self.w_resid.append(nn.Parameter(torch.ones(embed_dim), requires_grad=True))
             if self.n_man > 1:
-            if self.man_att:
-                self.w_man_att.append(Manifold_Linear(embed_dim, self.man_att_dim ,ball = man))
-                self.theta_man_att.append(nn.Linear(self.man_att_dim, 1))
+                if self.man_att:
+                    self.w_man_att.append(Manifold_Linear(embed_dim, self.man_att_dim ,ball = man))
+                    self.theta_man_att.append(nn.Linear(self.man_att_dim, 1))
+            self.pre_attn_norm.append(nn.LayerNorm(embed_dim))
+            self.pre_fc_norm.append(nn.LayerNorm(embed_dim))
+            
+            if scale_attn:
+                self.post_attn_norm.append(nn.LayerNorm(embed_dim))
+            if scale_fc:
+                self.post_fc_norm.append(nn.LayerNorm(self.ffn_dim))
                 
 
     def forward(self,  pm_x, pm_x_cls=None, padding_mask=None, attn_mask=None):
@@ -515,46 +451,72 @@ class PMBlock(nn.Module):
         Returns:
             encoded output of shape `(n_man, seq_len, batch, embed_dim)`
         """
+#         print('Padding mask')
+#         print(padding_mask.shape)
         output = []
         for i, man in enumerate(self.manifolds):
             x = pm_x[i]
-            if x_cls is not None:
+            if pm_x_cls is not None:
                 x_cls = pm_x_cls[i]
                 with torch.no_grad():
                     # prepend one element for x_cls: -> (batch, 1+seq_len)
-                    padding_mask = torch.cat((torch.zeros_like(padding_mask[:, :1]), padding_mask), dim=1)
+                    padding_mask_cur = torch.cat((torch.zeros_like(padding_mask[:, :1]), padding_mask), dim=1)
                 # class attention: https://arxiv.org/pdf/2103.17239.pdf
+#                 print(padding_mask.shape)
                 residual = x_cls
+                
                 u = torch.cat((x_cls, x), dim=0)  # (seq_len+1, batch, embed_dim)
-                x = self.attn[i](x_cls, u, u, key_padding_mask=padding_mask)[0]  # (1, batch, embed_dim)
+#                 print(u.shape)
+#                 print('In att')
+                u = man.expmap0(self.pre_attn_norm[i](man.logmap0(u)))
+                x = self.attn[i](x_cls, u, u, key_padding_mask=padding_mask_cur)[0]  # (1, batch, embed_dim)
             else:
+#                 print('In Block: Pre att')
+#                 print(x.isnan().any())
                 residual = x
+                x = man.expmap0(self.pre_attn_norm[i](man.logmap0(x)))
+                x = man.projx(x)
                 x = self.attn[i](x, x, x, key_padding_mask=padding_mask,
                               attn_mask=attn_mask)[0]  # (seq_len, batch, embed_dim)
-
+#                 print('In Block: Post att')
+#                 print(x.isnan().any())
+#                 print('Inf In Block: Post att')
+#                 print(torch.isinf(x).any())
+            
             if self.c_attn is not None:
+                
                 tgt_len = x.size(0)
                 # Reshape in tangent space
                 x = man.logmap0(x)
                 x = x.view(tgt_len, -1, self.num_heads, self.head_dim)
-                x = torch.einsum('tbhd,h->tbdh', x, self.c_attn)
+                x = torch.einsum('tbhd,h->tbdh', x, self.c_attn[i])
                 x = x.reshape(tgt_len, -1, self.embed_dim)
                 x = man.expmap0(x)
-                
+            if self.post_attn_norm is not None:
+                x = man.expmap0(self.post_attn_norm[i](man.logmap0(x)))
+                x = man.projx(x)
             x = self.dropout(x)
             x = man.mobius_add(x,residual)
-
+            
+            
+            
             residual = x
+            x = man.expmap0(self.pre_fc_norm[i](man.logmap0(x)))
+            x = man.projx(x)
             x = self.act(self.fc1[i](x))
+            if self.post_fc_norm is not None:
+                x = man.expmap0(self.post_fc_norm[i](man.logmap0(x)))
+                x = man.projx(x)
+                
             x = self.act_dropout(x)
             x = self.fc2[i](x)
             x = self.dropout(x)
             if self.w_resid is not None:
-                residual = man.mobius_scalar_mul(self.w_resid, residual)
+                residual = man.mobius_scalar_mul(self.w_resid[i], residual)
             x= man.mobius_add(x, residual)
             output.append(x)
         
-        if self.man_att:
+        if self.man_att and self.n_man > 1:
             tan_output = [self.manifolds[i].logmap0(self.w_man_att[i](output[i])) for i in range(self.n_man)]
             mu = torch.stack(tan_output)
             mu = torch.mean(mu, dim=0)
@@ -599,6 +561,7 @@ class PMTransformer(nn.Module):
         self.part_manifolds = nn.ModuleList()
         self.jet_manifolds = nn.ModuleList()
         parts = part_geom.split('x') if 'x' in part_geom else [part_geom]
+        jets = jet_geom.split('x') if 'x' in part_geom else [part_geom]
 
         for i, m in enumerate(parts):
             if m == 'R':
@@ -609,7 +572,7 @@ class PMTransformer(nn.Module):
                 self.part_manifolds.append(geoopt.SphereProjectionExact(k=part_curvatures[i], learnable=True))
         jets = jet_geom.split('x') if 'x' in jet_geom else [jet_geom]
 
-        for i, m in enumerate(parts):
+        for i, m in enumerate(jets):
             if m == 'R':
                 self.jet_manifolds.append(geoopt.Euclidean())
             elif m == 'H':
@@ -649,21 +612,21 @@ class PMTransformer(nn.Module):
             for_onnx=for_inference) if pair_embed_dims is not None and pair_input_dim + pair_extra_dim > 0 else None
         self.blocks = nn.ModuleList([PMBlock(**cfg_block) for _ in range(num_layers)])
         self.cls_blocks = nn.ModuleList([PMBlock(**cfg_cls_block) for _ in range(num_cls_layers)])
-        self.norm = nn.LayerNorm(embed_dim)
+#         self.norm =  nn.ModuleList(nn.LayerNorm(embed_dim) for _ in range(self.n_part_man))
         
         if fc_params is not None:
             self.jet_fc = nn.ModuleList()
             
             for man in self.jet_manifolds:
                 fcs = []
-                in_dim = embed_dim
+                in_dim = embed_dim * self.n_part_man
                 for out_dim, drop_rate in fc_params:
                     fcs.append(nn.Sequential(Manifold_Linear(in_dim, out_dim, ball = man), nn.ReLU(), nn.Dropout(drop_rate)))
                     in_dim = out_dim
                 self.jet_fc.append(nn.Sequential(*fcs))
-            self.final_fc = nn.Linear(self.n_man *in_dim, num_classes)
+            self.final_fc = nn.Linear(self.n_jet_man * in_dim, num_classes)
         else:
-            self.fc = None
+            self.jet_fc = None
 
         # init
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim), requires_grad=True)
@@ -679,14 +642,12 @@ class PMTransformer(nn.Module):
         # mask: (N, 1, P) -- real particle = 1, padded = 0
         # for pytorch: uu (N, C', num_pairs), uu_idx (N, 2, num_pairs)
         # for onnx: uu (N, C', P, P), uu_idx=None
-
         with torch.no_grad():
             if not self.for_inference:
                 if uu_idx is not None:
                     uu = build_sparse_tensor(uu, uu_idx, x.size(-1))
             x, v, mask, uu = self.trimmer(x, v, mask, uu)
             padding_mask = ~mask.squeeze(1)  # (N, P)
-
         with torch.cuda.amp.autocast(enabled=self.use_amp):
             # input embedding
             x = self.embed(x).masked_fill(~mask.permute(2, 0, 1), 0)  # (P, N, C)
@@ -694,38 +655,61 @@ class PMTransformer(nn.Module):
             if (v is not None or uu is not None) and self.pair_embed is not None:
                 attn_mask = self.pair_embed(v, uu).view(-1, v.size(-1), v.size(-1))  # (N*num_heads, P, P)
             
+            
+            
             # Map onto particle manifold
             x_parts = [man.expmap0(x) for man in self.part_manifolds]
-            
-            # transform
-            for block in self.blocks:
-                x_parts = block(x_parts, x_cls=None, padding_mask=padding_mask, attn_mask=attn_mask)
-
             # extract class token
             cls_tokens = self.cls_token.expand(1, x.size(1), -1)  # (1, N, C)
-            cls_tokens_parts = [man.expmap0(cls_tokens_parts) for man in self.part_manifolds]
-            for block in self.cls_blocks:
-                cls_tokens_parts = block(x_parts, x_cls=cls_tokens_parts, padding_mask=padding_mask)
-
-            x_cls_part = self.norm(cls_tokens_parts).squeeze(0)
+            cls_tokens_parts = [man.expmap0(cls_tokens) for man in self.part_manifolds]
             
+            del cls_tokens
+            del x
+            # transform
+#             print('Pre blocks')
+#             print(x_parts[0].isnan().any())
+            for block in self.blocks:
+                x_parts = block(x_parts, pm_x_cls=None, padding_mask=padding_mask, attn_mask=attn_mask)
+            
+#             print('Post blocks')
+#             print(x_parts[0].isnan().any())
+            
+            for block in self.cls_blocks:
+                cls_tokens_parts = block(x_parts, pm_x_cls=cls_tokens_parts, padding_mask=padding_mask)
+            cls_tokens_parts = [man.logmap0(cls_tokens_parts[i]) for i,man in enumerate(self.part_manifolds)]
+            
+#             print('Post Class blocks')
+#             print(cls_tokens_parts[0].isnan().any())
             # Concatenate particle man outputs
-            if self.n_man > 1:
-                x_cls = torch.cat(x_cls_part,dim=0)
+            if self.n_part_man > 1:
+                x_cls = torch.cat(cls_tokens_parts,dim=-1)
             else:
-                x_cls = x_cls_part[0]
+                x_cls = cls_tokens_parts[0]
+            del cls_tokens_parts
             
             # fc
-            if self.fc is None:
+            if self.jet_fc is None:
                 return x_cls
             # Map to Jet Manifold
-            x_jets = [man.expmap0(x) for man in self.jet_manifolds]
+            x_jets = [man.expmap0(x_cls) for man in self.jet_manifolds]
+            del x_cls
+            
             x_jets = [self.jet_fc[i](x_jets[i]) for i in range(self.n_jet_man)]
-            x_jets_tan = [man.logmap0(x_jets[i]) for i,m in enumerate(self.jet_manifolds)]
-            x_out = torch.cat(x_jets_tan,dim=0)
+            
+            x_jets_tan = [man.logmap0(x_jets[i]) for i,man in enumerate(self.jet_manifolds)]
+            del x_jets
+            
+            if self.n_part_man > 1:
+                x_out = torch.cat(x_jets_tan,dim=-1)
+            else:
+                x_out = x_jets_tan[0]
+            
+#             print('Pre Final FC')
+#             print(x_out.isnan().any())
             
             # Final classification FC
-            output = self.final_fc(x_out)
+            output = self.final_fc(x_out).squeeze(0)
+#             print(output.shape)
             if self.for_inference:
                 output = torch.softmax(output, dim=1)
             # print('output:\n', output)

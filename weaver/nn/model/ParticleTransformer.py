@@ -384,21 +384,23 @@ class Block(nn.Module):
         self.head_dim = embed_dim // num_heads
         self.ffn_dim = embed_dim * ffn_ratio
 
-        self.pre_attn_norm = nn.LayerNorm(embed_dim)
         self.attn = nn.MultiheadAttention(
             embed_dim,
             num_heads,
             dropout=attn_dropout,
             add_bias_kv=add_bias_kv,
         )
-        self.post_attn_norm = nn.LayerNorm(embed_dim) if scale_attn else None
+        
         self.dropout = nn.Dropout(dropout)
-
+        
+        self.pre_attn_norm = nn.LayerNorm(embed_dim)
+        self.post_attn_norm = nn.LayerNorm(embed_dim) if scale_attn else None
         self.pre_fc_norm = nn.LayerNorm(embed_dim)
+        self.post_fc_norm = nn.LayerNorm(self.ffn_dim) if scale_fc else None
+
         self.fc1 = nn.Linear(embed_dim, self.ffn_dim)
         self.act = nn.GELU() if activation == 'gelu' else nn.ReLU()
         self.act_dropout = nn.Dropout(activation_dropout)
-        self.post_fc_norm = nn.LayerNorm(self.ffn_dim) if scale_fc else None
         self.fc2 = nn.Linear(self.ffn_dim, embed_dim)
 
         self.c_attn = nn.Parameter(torch.ones(num_heads), requires_grad=True) if scale_heads else None
@@ -416,7 +418,7 @@ class Block(nn.Module):
         Returns:
             encoded output of shape `(seq_len, batch, embed_dim)`
         """
-
+        
         if x_cls is not None:
             with torch.no_grad():
                 # prepend one element for x_cls: -> (batch, 1+seq_len)
@@ -431,6 +433,7 @@ class Block(nn.Module):
             x = self.pre_attn_norm(x)
             x = self.attn(x, x, x, key_padding_mask=padding_mask,
                           attn_mask=attn_mask)[0]  # (seq_len, batch, embed_dim)
+        
 
         if self.c_attn is not None:
             tgt_len = x.size(0)
