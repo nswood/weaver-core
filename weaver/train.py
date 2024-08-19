@@ -132,7 +132,7 @@ parser.add_argument('--io-test', action='store_true', default=False,
                     help='test throughput of the dataloader')
 parser.add_argument('--copy-inputs', action='store_true', default=False,
                     help='copy input files to the current dir (can help to speed up dataloading when running over remote files, e.g., from EOS)')
-parser.add_argument('--log', type=str, default='',
+parser.add_argument('--log', '--log-dir', '--log_dir', type=str, default='',
                     help='path to the log file; `{auto}` can be used as part of the path to auto-generate a name, based on the timestamp and network configuration')
 parser.add_argument('--print', action='store_true', default=False,
                     help='do not run training/prediction but only print model information, e.g., FLOPs and number of parameters of a model')
@@ -142,6 +142,14 @@ parser.add_argument('--backend', type=str, choices=['gloo', 'nccl', 'mpi'], defa
                     help='backend for distributed training')
 parser.add_argument('--cross-validation', type=str, default=None,
                     help='enable k-fold cross validation; input format: `variable_name%%k`')
+parser.add_argument('--part-geom', type=str, default=None,
+                    help='particle geometry for PM Transformer; input format: `H`,`R`,`S`, or PM such as `HxR`')
+parser.add_argument('--part-dim', type=int, default=0,
+                    help='dimension for each manifold in particle-level reperesentation')
+parser.add_argument('--jet-geom', type=str, default=None,
+                    help='jet geometry for PM Transformer; input format: `H`,`R`,`S`, or PM such as `HxR`')
+parser.add_argument('--jet-dim', type=int, default=0,
+                    help='dimension for each manifold in jet-level reperesentation')
 
 
 def to_filelist(args, mode='train'):
@@ -568,7 +576,16 @@ def model_setup(args, data_config, device='cpu'):
         network_options['for_inference'] = True
     if args.use_amp:
         network_options['use_amp'] = True
-    model, model_info = network_module.get_model(data_config, **network_options)
+        
+    args_dict = vars(args)
+    # Filter the args_dict to only include specific keys
+    filtered_args_dict = {k: args_dict[k] for k in ['part_geom', 'part_dim', 'jet_geom', 'jet_dim'] if k in args_dict}
+
+    # Merge dictionaries
+    combined_options = {**network_options, **filtered_args_dict}
+
+    model, model_info = network_module.get_model(data_config, **combined_options)
+#     model = model.double() 
     if args.load_model_weights:
         model_state = torch.load(args.load_model_weights, map_location='cpu')
         if args.exclude_model_weights:

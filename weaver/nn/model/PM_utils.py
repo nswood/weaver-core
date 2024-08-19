@@ -34,25 +34,30 @@ class Manifold_Linear(nn.Module):
         self.out_features = out_features
         self.ball = ball
         self.weight = geoopt.ManifoldParameter(torch.Tensor(out_features,in_features,),manifold=self.ball)
+        self.__params__ = self.in_features* self.out_features
+        if bias: 
+            self.__params__ += self.out_features
+        
         if bias:
             self.bias = geoopt.ManifoldParameter(torch.Tensor(out_features),manifold=self.ball)
         else:
             self.register_parameter("bias", None)
         self.reset_parameters()
+        
     
     def reset_parameters(self):
-        init.kaiming_uniform_(self.weight, a=math.sqrt(0.001))
+        init.kaiming_uniform_(self.weight, a=math.sqrt(1e-4))
         if self.bias is not None:
             fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
             bound = 1 / math.sqrt(fan_in)
             init.uniform_(self.bias, -bound, bound)
 
-    def forward(self, x, c=None):
-        
+    def forward(self, x):
         
         mv = self.ball.mobius_matvec(self.weight,x)
+#         if self.ball.name != 'Euclidean':
+#             print(self.ball.k)
         
-
         if not self.bias is None:
             mv = self.ball.mobius_add(mv, self.bias)
         return self.ball.projx(mv)
@@ -163,27 +168,31 @@ class ManifoldMHA(nn.Module):
 #         print(attention_scores.isnan().any())
 #         print('Inf In att: pre masking attention_scores')
 #         print(torch.isinf(attention_scores).any())
-        
+#         if attention_scores.isnan().any():
+#             print('In Att: attention_scores 1')
         # Apply the key_padding_mask if provided
         if key_padding_mask is not None:
             # Expand mask to [batch_size, num_heads, 1, seq_len] and then subtract a large value where the mask is True
             key_padding_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1, seq_len]
             attention_scores = attention_scores.masked_fill(key_padding_mask, float('-inf'))
             
-            
+#         if attention_scores.isnan().any():
+#             print('In Att: attention_scores 2')
         # Apply the attn_mask if provided
         if attn_mask is not None:
             attn_mask = attn_mask.reshape(query.shape[0], self.num_attention_heads, nparts, nparts)
 #             print(attn_mask.shape)
             attention_scores += attn_mask
-    
+#         if attention_scores.isnan().any():
+#             print('In Att: attention_scores 3')
 #         print('In att: attention_scores after masking')
 #         print(attention_scores.isnan().any())
 #         print('Inf In att: attention_scores')
 #         print(torch.isinf(attention_scores).any())
         attention_scores = torch.clamp(attention_scores, min=-1e10, max=1e10)
         attention_probs = self.sigmoid_fn(attention_scores)
-        
+#         if attention_scores.isnan().any():
+#             print('In Att: attention_scores 4')
         
 # #         print('Inf In att: att probs')
 # #         print(torch.isinf(attention_probs).any())
@@ -206,10 +215,14 @@ class ManifoldMHA(nn.Module):
 #             print('In att: context layer')
 #             print(context_layer.isnan().any())
         else:
-            attention_probs = attention_probs.permute(0,1,3,2)
+#             attention_probs = attention_probs.permute(0,1,3,2)
 #             print('Inf In att: value layer')
 #             print(torch.isinf(value_layer).any())
-            context_layer = self.ball.weighted_midpoint(value_layer, weights=attention_probs, reducedim=[-1], parts=query_parts, dim =-2)
+#             print(value_layer.shape)
+#             print(attention_probs.shape)
+            context_layer = self.ball.weighted_midpoint(value_layer, weights=attention_probs, reducedim=[-1], parts=query_parts, dim =-1)
+#             if context_layer.isnan().any():
+#                 print('In Att: context_layer 1')
             
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         
@@ -219,6 +232,9 @@ class ManifoldMHA(nn.Module):
         context_layer = self.ball.logmap0(context_layer)
         context_layer = context_layer.view(new_context_layer_shape)
         context_layer = self.ball.expmap0(context_layer)
+        
+#         if context_layer.isnan().any():
+#             print('In Att: context_layer 2')
         
         context_layer = context_layer.permute(1,0,2)
 #         print('Inf In att: context layer')

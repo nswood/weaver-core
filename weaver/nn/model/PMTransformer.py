@@ -377,11 +377,13 @@ os.environ['PYTHONPATH'] = '/n/home11/nswood/weaver-core/weaver/nn/model'
 
 from .PM_utils import *
 
+
+
 class PMBlock(nn.Module):
     def __init__(self,manifolds, embed_dim=128, num_heads=8, ffn_ratio=4,
                  dropout=0.1, attn_dropout=0.1, activation_dropout=0.1,
                  add_bias_kv=False, activation='gelu',
-                 scale_fc=True, scale_attn=True, scale_heads=True, scale_resids=True,man_att = False):
+                 scale_fc=True, scale_attn=True, scale_heads=False, scale_resids=True,man_att = False):
         super().__init__()
         
         self.manifolds = manifolds
@@ -401,13 +403,12 @@ class PMBlock(nn.Module):
         
         
         self.pre_attn_norm = nn.ModuleList()
-        
         self.pre_fc_norm = nn.ModuleList()
         
-        if scale_attn:
-            self.post_attn_norm = nn.ModuleList()
-        if scale_fc:
-            self.post_fc_norm = nn.ModuleList()
+#         if scale_attn:
+#             self.post_attn_norm = nn.ModuleList()
+#         if scale_fc:
+#             self.post_fc_norm = nn.ModuleList()
         
         self.fc1 = nn.ModuleList()
         self.fc2 = nn.ModuleList()
@@ -430,13 +431,20 @@ class PMBlock(nn.Module):
                 if self.man_att:
                     self.w_man_att.append(Manifold_Linear(embed_dim, self.man_att_dim ,ball = man))
                     self.theta_man_att.append(nn.Linear(self.man_att_dim, 1))
+            if man.name == 'Euclidean':
+#                 self.pre_attn_norm = nn.LayerNorm(embed_dim)
+                self.post_attn_norm = nn.LayerNorm(embed_dim) if scale_attn else None
+#                 self.pre_fc_norm = nn.LayerNorm(embed_dim)
+                self.post_fc_norm = nn.LayerNorm(self.ffn_dim) if scale_fc else None
+            else:
+                self.post_attn_norm =  None
+                self.post_fc_norm =  None
             self.pre_attn_norm.append(nn.LayerNorm(embed_dim))
             self.pre_fc_norm.append(nn.LayerNorm(embed_dim))
-            
-            if scale_attn:
-                self.post_attn_norm.append(nn.LayerNorm(embed_dim))
-            if scale_fc:
-                self.post_fc_norm.append(nn.LayerNorm(self.ffn_dim))
+#             if scale_attn:
+#                 self.post_attn_norm.append(nn.LayerNorm(embed_dim))
+#             if scale_fc:
+#                 self.post_fc_norm.append(nn.LayerNorm(self.ffn_dim))
                 
 
     def forward(self,  pm_x, pm_x_cls=None, padding_mask=None, attn_mask=None):
@@ -468,52 +476,71 @@ class PMBlock(nn.Module):
                 u = torch.cat((x_cls, x), dim=0)  # (seq_len+1, batch, embed_dim)
 #                 print(u.shape)
 #                 print('In att')
+#                 if man.name == 'Euclidean':
+#                     u = self.pre_attn_norm(u)
                 u = man.expmap0(self.pre_attn_norm[i](man.logmap0(u)))
+                u = man.projx(u)
                 x = self.attn[i](x_cls, u, u, key_padding_mask=padding_mask_cur)[0]  # (1, batch, embed_dim)
+                x = man.projx(x)
             else:
-#                 print('In Block: Pre att')
-#                 print(x.isnan().any())
+#                 if x.isnan().any():
+#                     print('In Block: Pre att')
                 residual = x
                 x = man.expmap0(self.pre_attn_norm[i](man.logmap0(x)))
                 x = man.projx(x)
+#                 if man.name == 'Euclidean':
+#                     x = self.pre_attn_norm(x)
                 x = self.attn[i](x, x, x, key_padding_mask=padding_mask,
                               attn_mask=attn_mask)[0]  # (seq_len, batch, embed_dim)
+                x = man.projx(x)
+                
+    
 #                 print('In Block: Post att')
 #                 print(x.isnan().any())
 #                 print('Inf In Block: Post att')
 #                 print(torch.isinf(x).any())
             
-            if self.c_attn is not None:
+#             if self.c_attn is not None:
                 
-                tgt_len = x.size(0)
-                # Reshape in tangent space
-                x = man.logmap0(x)
-                x = x.view(tgt_len, -1, self.num_heads, self.head_dim)
-                x = torch.einsum('tbhd,h->tbdh', x, self.c_attn[i])
-                x = x.reshape(tgt_len, -1, self.embed_dim)
-                x = man.expmap0(x)
-            if self.post_attn_norm is not None:
-                x = man.expmap0(self.post_attn_norm[i](man.logmap0(x)))
-                x = man.projx(x)
+#                 tgt_len = x.size(0)
+#                 # Reshape in tangent space
+#                 x = man.logmap0(x)
+#                 x = x.view(tgt_len, -1, self.num_heads, self.head_dim)
+#                 x = torch.einsum('tbhd,h->tbdh', x, self.c_attn[i])
+#                 x = x.reshape(tgt_len, -1, self.embed_dim)
+#                 x = man.expmap0(x)
+#             if man.name == 'Euclidean':
+#                 x = self.pre_attn_norm(x)
+            if self.post_attn_norm is not None and man.name == 'Euclidean':
+                x = self.post_attn_norm(x)
+#                 x = man.projx(x)
             x = self.dropout(x)
             x = man.mobius_add(x,residual)
+            x = man.projx(x)
             
             
             
             residual = x
+#             if man.name == 'Euclidean':
+#                 x = self.pre_fc_norm(x)
             x = man.expmap0(self.pre_fc_norm[i](man.logmap0(x)))
             x = man.projx(x)
+            
             x = self.act(self.fc1[i](x))
-            if self.post_fc_norm is not None:
-                x = man.expmap0(self.post_fc_norm[i](man.logmap0(x)))
-                x = man.projx(x)
-                
+            if self.post_fc_norm is not None and man.name == 'Euclidean':
+                x = self.post_fc_norm(x)
+#                 x = man.projx(x)
+#             if x.isnan().any():
+#                 print('In Block: Post FC1')    
             x = self.act_dropout(x)
             x = self.fc2[i](x)
             x = self.dropout(x)
+#             if x.isnan().any():
+#                 print('In Block: Post FC2')
             if self.w_resid is not None:
                 residual = man.mobius_scalar_mul(self.w_resid[i], residual)
             x= man.mobius_add(x, residual)
+            x = man.projx(x)
             output.append(x)
         
         if self.man_att and self.n_man > 1:
@@ -522,9 +549,9 @@ class PMBlock(nn.Module):
             mu = torch.mean(mu, dim=0)
             inter_att = [self.theta_man_att[i](tan_output[i]-mu) for i in range(self.n_man)]
             w_i = nn.Softmax(dim=0)(torch.stack(inter_att,dim =0))
-            proc_output_jet = []
+            proc_jets = []
             for i in range(self.n_man):
-                proc_output_jet.append(self.manifolds[i].mobius_scalar_mul(w_i[i], output[i]))
+                proc_jets.append(self.manifolds[i].mobius_scalar_mul(w_i[i], output[i]))
         return output
 
     
@@ -539,12 +566,11 @@ class PMTransformer(nn.Module):
                  pair_extra_dim=0,
                  remove_self_pair=False,
                  use_pre_activation_pair=True,
-                 embed_dims=[128, 512, 128],
                  pair_embed_dims=[64, 64, 64],
                  part_geom = 'R',
-                 part_curvatures = [0],
+                 part_dim = 64,
                  jet_geom = 'R',
-                 jet_curvatures = [0],
+                 jet_dim = 64,
                  num_heads=8,
                  num_layers=8,
                  num_cls_layers=2,
@@ -561,24 +587,27 @@ class PMTransformer(nn.Module):
         self.part_manifolds = nn.ModuleList()
         self.jet_manifolds = nn.ModuleList()
         parts = part_geom.split('x') if 'x' in part_geom else [part_geom]
-        jets = jet_geom.split('x') if 'x' in part_geom else [part_geom]
+        jets = jet_geom.split('x') if 'x' in jet_geom else [jet_geom]
+        
+        embed_dims = [part_dim, part_dim, part_dim] #embed_dims=[128, 512, 128]
+        fc_params = [[jet_dim,0.1], [jet_dim,0.1], [jet_dim,0.1]]#fc_params=[],
 
         for i, m in enumerate(parts):
             if m == 'R':
                 self.part_manifolds.append(geoopt.Euclidean())
             elif m == 'H':
-                self.part_manifolds.append(geoopt.PoincareBallExact(c=part_curvatures[i], learnable=True))
+                self.part_manifolds.append(geoopt.PoincareBallExact(c=2.0, learnable=True))
             elif m == 'S':
-                self.part_manifolds.append(geoopt.SphereProjectionExact(k=part_curvatures[i], learnable=True))
+                self.part_manifolds.append(geoopt.SphereProjectionExact(k=2.0, learnable=True))
         jets = jet_geom.split('x') if 'x' in jet_geom else [jet_geom]
 
         for i, m in enumerate(jets):
             if m == 'R':
                 self.jet_manifolds.append(geoopt.Euclidean())
             elif m == 'H':
-                self.jet_manifolds.append(geoopt.PoincareBallExact(c=jet_curvatures[i], learnable=True))
+                self.jet_manifolds.append(geoopt.PoincareBallExact(c=2.0, learnable=True))
             elif m == 'S':
-                self.jet_manifolds.append(geoopt.SphereProjectionExact(k=jet_curvatures[i], learnable=True))
+                self.jet_manifolds.append(geoopt.SphereProjectionExact(k=2.0, learnable=True))
 
         self.n_part_man = len(self.part_manifolds)
         self.n_jet_man = len(self.jet_manifolds)
@@ -591,15 +620,17 @@ class PMTransformer(nn.Module):
         default_cfg = dict(embed_dim=embed_dim, num_heads=num_heads, ffn_ratio=4,
                            dropout=0.1, attn_dropout=0.1, activation_dropout=0.1,
                            add_bias_kv=False, activation=activation,
-                           scale_fc=True, scale_attn=True, scale_heads=True, scale_resids=True, 
-                           manifolds = self.part_manifolds,man_att = True)
+                           scale_fc=True, scale_attn=True, scale_heads=False, scale_resids=True, 
+                           manifolds = self.part_manifolds,man_att = False)
 
         cfg_block = copy.deepcopy(default_cfg)
+        
         if block_params is not None:
             cfg_block.update(block_params)
         _logger.info('cfg_block: %s' % str(cfg_block))
 
         cfg_cls_block = copy.deepcopy(default_cfg)
+        cfg_cls_block['man_att'] = False
         if cls_block_params is not None:
             cfg_cls_block.update(cls_block_params)
         _logger.info('cfg_cls_block: %s' % str(cfg_cls_block))
@@ -610,13 +641,20 @@ class PMTransformer(nn.Module):
             pair_input_dim, pair_extra_dim, pair_embed_dims + [cfg_block['num_heads']],
             remove_self_pair=remove_self_pair, use_pre_activation_pair=use_pre_activation_pair,
             for_onnx=for_inference) if pair_embed_dims is not None and pair_input_dim + pair_extra_dim > 0 else None
-        self.blocks = nn.ModuleList([PMBlock(**cfg_block) for _ in range(num_layers)])
+#         self.blocks = nn.ModuleList([PMBlock(**cfg_block) for _ in range(num_layers)])
+        self.blocks = nn.ModuleList()
+        for i in range(num_layers):
+            cfg_block['man_att'] =  (i !=0 and i %3 == 0)
+            self.blocks.append(PMBlock(**cfg_block))
+            
         self.cls_blocks = nn.ModuleList([PMBlock(**cfg_cls_block) for _ in range(num_cls_layers)])
 #         self.norm =  nn.ModuleList(nn.LayerNorm(embed_dim) for _ in range(self.n_part_man))
         
         if fc_params is not None:
             self.jet_fc = nn.ModuleList()
-            
+            if self.n_jet_man > 1:
+                self.w_man_att_jet = nn.ModuleList()
+                self.theta_man_att_jet = nn.ModuleList()
             for man in self.jet_manifolds:
                 fcs = []
                 in_dim = embed_dim * self.n_part_man
@@ -624,13 +662,23 @@ class PMTransformer(nn.Module):
                     fcs.append(nn.Sequential(Manifold_Linear(in_dim, out_dim, ball = man), nn.ReLU(), nn.Dropout(drop_rate)))
                     in_dim = out_dim
                 self.jet_fc.append(nn.Sequential(*fcs))
+                if self.n_jet_man > 1:
+                    self.w_man_att_jet.append(Manifold_Linear(embed_dim, self.man_att_dim ,ball = man))
+                    self.theta_man_att_jet.append(nn.Linear(self.man_att_dim, 1))
+
             self.final_fc = nn.Linear(self.n_jet_man * in_dim, num_classes)
         else:
             self.jet_fc = None
 
         # init
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim), requires_grad=True)
-        trunc_normal_(self.cls_token, std=.02)
+        self.cls_token = nn.ParameterList()
+        for man in self.part_manifolds:
+            cur_token = geoopt.ManifoldParameter(torch.zeros(1, 1, embed_dim), requires_grad=True, manifold = man)
+            trunc_normal_(cur_token, std=.02)
+            self.cls_token.append(cur_token)
+        
+#         self.cls_token = [nn.Parameter(torch.zeros(1, 1, embed_dim), requires_grad=True)
+        
 
     @torch.jit.ignore
     def no_weight_decay(self):
@@ -655,31 +703,34 @@ class PMTransformer(nn.Module):
             if (v is not None or uu is not None) and self.pair_embed is not None:
                 attn_mask = self.pair_embed(v, uu).view(-1, v.size(-1), v.size(-1))  # (N*num_heads, P, P)
             
-            
+#             if 'Poincare' in man.name:
+#                     # r = 0.6
+#                     x_cur = torch.clamp(0.6/x.norm(dim=1), max = 1)*x
+#                     cls_cur = torch.clamp(0.6/cls_tokens.norm(dim=1), max = 1)*cls_tokens
+#                 else:
             
             # Map onto particle manifold
-            x_parts = [man.expmap0(x) for man in self.part_manifolds]
+#             cls_tokens = self.cls_token.expand(1, x.size(1), -1)
+            x_parts = []
+            cls_tokens_parts = []
+            for i,man in enumerate(self.part_manifolds):
+                cls_tokens = self.cls_token[i].expand(1, x.size(1), -1)
+                x_parts.append(man.expmap0(x))
+                cls_tokens_parts.append(man.expmap0(cls_tokens))
             # extract class token
-            cls_tokens = self.cls_token.expand(1, x.size(1), -1)  # (1, N, C)
-            cls_tokens_parts = [man.expmap0(cls_tokens) for man in self.part_manifolds]
+              # (1, N, C)
             
             del cls_tokens
             del x
             # transform
-#             print('Pre blocks')
-#             print(x_parts[0].isnan().any())
             for block in self.blocks:
                 x_parts = block(x_parts, pm_x_cls=None, padding_mask=padding_mask, attn_mask=attn_mask)
             
-#             print('Post blocks')
-#             print(x_parts[0].isnan().any())
-            
             for block in self.cls_blocks:
                 cls_tokens_parts = block(x_parts, pm_x_cls=cls_tokens_parts, padding_mask=padding_mask)
+                
             cls_tokens_parts = [man.logmap0(cls_tokens_parts[i]) for i,man in enumerate(self.part_manifolds)]
             
-#             print('Post Class blocks')
-#             print(cls_tokens_parts[0].isnan().any())
             # Concatenate particle man outputs
             if self.n_part_man > 1:
                 x_cls = torch.cat(cls_tokens_parts,dim=-1)
@@ -690,13 +741,32 @@ class PMTransformer(nn.Module):
             # fc
             if self.jet_fc is None:
                 return x_cls
+            
             # Map to Jet Manifold
             x_jets = [man.expmap0(x_cls) for man in self.jet_manifolds]
             del x_cls
             
             x_jets = [self.jet_fc[i](x_jets[i]) for i in range(self.n_jet_man)]
             
-            x_jets_tan = [man.logmap0(x_jets[i]) for i,man in enumerate(self.jet_manifolds)]
+            
+            if self.n_jet_man > 1:
+                #Inspired arXiv:2112.05393v1 inspired operations
+                proc_log = [self.jet_manifolds[i].logmap0(self.w_man_att_jet[i](x_jets[i])) for i in range(self.n_man_jet)]
+                mu = torch.stack(proc_log)
+                mu = torch.mean(mu, dim=0)
+                inter_att = [self.theta_man_att_jet[i](proc_log[i]-mu) for i in range(self.n_man_jet)]
+
+                w_i = nn.Softmax(dim=0)(torch.stack(inter_att,dim =0))
+                proc_jets = []
+                for i in range(self.n_jet_man):
+                    if self.jet_manifolds[i].name == 'Euclidean':
+                        proc_jets.append(w_i[i]*x_jets[i])
+                    else:
+                        proc_jets.append(self.jet_manifolds[i].mobius_scalar_mul(w_i[i], x_jets[i]))
+            else:
+                proc_jets = x_jets
+            
+            x_jets_tan = [man.logmap0(proc_jets[i]) for i,man in enumerate(self.jet_manifolds)]
             del x_jets
             
             if self.n_part_man > 1:
@@ -704,8 +774,6 @@ class PMTransformer(nn.Module):
             else:
                 x_out = x_jets_tan[0]
             
-#             print('Pre Final FC')
-#             print(x_out.isnan().any())
             
             # Final classification FC
             output = self.final_fc(x_out).squeeze(0)
