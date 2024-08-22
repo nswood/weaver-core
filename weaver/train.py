@@ -376,7 +376,7 @@ def flops(model, model_info, device='cpu'):
     model.eval()
 
     inputs = tuple(
-        torch.ones(model_info['input_shapes'][k], dtype=torch.float32, device=device) for k in model_info['input_names'])
+        torch.ones(model_info['input_shapes'][k], dtype=torch.float64, device=device) for k in model_info['input_names'])
 
     macs, params = get_model_complexity_info(model, inputs, as_strings=True, print_per_layer_stat=True, verbose=True)
     _logger.info('{:<30}  {:<8}'.format('Computational complexity: ', macs))
@@ -585,7 +585,7 @@ def model_setup(args, data_config, device='cpu'):
     combined_options = {**network_options, **filtered_args_dict}
 
     model, model_info = network_module.get_model(data_config, **combined_options)
-#     model = model.double() 
+    model = model.double() 
     if args.load_model_weights:
         model_state = torch.load(args.load_model_weights, map_location='cpu')
         if args.exclude_model_weights:
@@ -751,7 +751,7 @@ def _main(args):
 
     # training/testing mode
     training_mode = not args.predict
-
+    
     # device
     if args.gpus:
         # distributed training
@@ -835,7 +835,20 @@ def _main(args):
             lr_finder.range_test(train_loader, start_lr=float(start_lr), end_lr=float(end_lr), num_iter=int(num_iter))
             lr_finder.plot(output='lr_finder.png')  # to inspect the loss-learning rate graph
             return
-
+        
+        
+        output_metric_dir = args.data_config.split('/')[1]+'_performance_summary'
+        if not os.path.exists(output_metric_dir):
+            os.makedirs(output_metric_dir)
+        output_file_name = args.tensorboard
+        output_file_path = os.path.join(output_metric_dir, f"{output_file_name}_performance.csv")
+        args.output_file_path = output_file_path
+        
+        
+        if os.path.exists(output_file_path):
+            os.remove(output_file_path)
+        
+        
         # training loop
         best_valid_metric = np.inf if args.regression_mode else 0
         grad_scaler = torch.cuda.amp.GradScaler() if args.use_amp else None
@@ -861,7 +874,7 @@ def _main(args):
 
             _logger.info('Epoch #%d validating' % epoch)
             valid_metric = evaluate(model, val_loader, dev, epoch, loss_func=loss_func,
-                                    steps_per_epoch=args.steps_per_epoch_val, tb_helper=tb)
+                                    steps_per_epoch=args.steps_per_epoch_val, tb_helper=tb,args = args)
             is_best_epoch = (
                 valid_metric < best_valid_metric) if args.regression_mode else(
                 valid_metric > best_valid_metric)
@@ -911,7 +924,7 @@ def _main(args):
                 test_metric, scores, labels, observers = evaluate_onnx(args.model_prefix, test_loader)
             else:
                 test_metric, scores, labels, observers = evaluate(
-                    model, test_loader, dev, epoch=None, for_training=False, tb_helper=tb)
+                    model, test_loader, dev, epoch=None, for_training=False, tb_helper=tb, args = args)
             _logger.info('Test metric %.5f' % test_metric, color='bold')
             del test_loader
 

@@ -389,8 +389,7 @@ class PMBlock(nn.Module):
         self.manifolds = manifolds
         self.n_man = len(manifolds)
         self.man_att = man_att
-        if self.man_att:
-            self.man_att_dim = embed_dim
+        self.man_att_dim = embed_dim
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
@@ -472,7 +471,6 @@ class PMBlock(nn.Module):
                 # class attention: https://arxiv.org/pdf/2103.17239.pdf
 #                 print(padding_mask.shape)
                 residual = x_cls
-                
                 u = torch.cat((x_cls, x), dim=0)  # (seq_len+1, batch, embed_dim)
 #                 print(u.shape)
 #                 print('In att')
@@ -509,15 +507,12 @@ class PMBlock(nn.Module):
 #                 x = torch.einsum('tbhd,h->tbdh', x, self.c_attn[i])
 #                 x = x.reshape(tgt_len, -1, self.embed_dim)
 #                 x = man.expmap0(x)
-#             if man.name == 'Euclidean':
-#                 x = self.pre_attn_norm(x)
             if self.post_attn_norm is not None and man.name == 'Euclidean':
                 x = self.post_attn_norm(x)
 #                 x = man.projx(x)
-            x = self.dropout(x)
+#             x = self.dropout(x)
             x = man.mobius_add(x,residual)
             x = man.projx(x)
-            
             
             
             residual = x
@@ -534,9 +529,10 @@ class PMBlock(nn.Module):
 #                 print('In Block: Post FC1')    
             x = self.act_dropout(x)
             x = self.fc2[i](x)
-            x = self.dropout(x)
+#             x = self.dropout(x)
 #             if x.isnan().any():
 #                 print('In Block: Post FC2')
+
             if self.w_resid is not None:
                 residual = man.mobius_scalar_mul(self.w_resid[i], residual)
             x= man.mobius_add(x, residual)
@@ -617,7 +613,7 @@ class PMTransformer(nn.Module):
         self.use_amp = use_amp
 
         embed_dim = embed_dims[-1] if len(embed_dims) > 0 else input_dim
-        default_cfg = dict(embed_dim=embed_dim, num_heads=num_heads, ffn_ratio=4,
+        default_cfg = dict(embed_dim=embed_dim, num_heads=num_heads, ffn_ratio=1,
                            dropout=0.1, attn_dropout=0.1, activation_dropout=0.1,
                            add_bias_kv=False, activation=activation,
                            scale_fc=True, scale_attn=True, scale_heads=False, scale_resids=True, 
@@ -659,14 +655,18 @@ class PMTransformer(nn.Module):
                 fcs = []
                 in_dim = embed_dim * self.n_part_man
                 for out_dim, drop_rate in fc_params:
-                    fcs.append(nn.Sequential(Manifold_Linear(in_dim, out_dim, ball = man), nn.ReLU(), nn.Dropout(drop_rate)))
+#                     fcs.append(nn.Sequential(Manifold_Linear(in_dim, out_dim, ball = man), nn.ReLU(), nn.Dropout(drop_rate)))
+                    fcs.append(nn.Sequential(Manifold_Linear(in_dim, out_dim, ball = man), nn.ReLU()))
                     in_dim = out_dim
                 self.jet_fc.append(nn.Sequential(*fcs))
                 if self.n_jet_man > 1:
-                    self.w_man_att_jet.append(Manifold_Linear(embed_dim, self.man_att_dim ,ball = man))
-                    self.theta_man_att_jet.append(nn.Linear(self.man_att_dim, 1))
-
-            self.final_fc = nn.Linear(self.n_jet_man * in_dim, num_classes)
+                    self.w_man_att_jet.append(Manifold_Linear(out_dim, out_dim ,ball = man))
+                    self.theta_man_att_jet.append(nn.Linear(out_dim, 1))
+            post_jet_dim = self.n_jet_man * in_dim
+            self.final_fc = nn.Sequential(nn.Linear(post_jet_dim, post_jet_dim), nn.ReLU(),
+                                          nn.Linear(post_jet_dim, post_jet_dim), nn.ReLU(),
+                                          nn.Linear(post_jet_dim, num_classes))
+            
         else:
             self.jet_fc = None
 
@@ -751,10 +751,10 @@ class PMTransformer(nn.Module):
             
             if self.n_jet_man > 1:
                 #Inspired arXiv:2112.05393v1 inspired operations
-                proc_log = [self.jet_manifolds[i].logmap0(self.w_man_att_jet[i](x_jets[i])) for i in range(self.n_man_jet)]
+                proc_log = [self.jet_manifolds[i].logmap0(self.w_man_att_jet[i](x_jets[i])) for i in range(self.n_jet_man)]
                 mu = torch.stack(proc_log)
                 mu = torch.mean(mu, dim=0)
-                inter_att = [self.theta_man_att_jet[i](proc_log[i]-mu) for i in range(self.n_man_jet)]
+                inter_att = [self.theta_man_att_jet[i](proc_log[i]-mu) for i in range(self.n_jet_man)]
 
                 w_i = nn.Softmax(dim=0)(torch.stack(inter_att,dim =0))
                 proc_jets = []
@@ -769,11 +769,10 @@ class PMTransformer(nn.Module):
             x_jets_tan = [man.logmap0(proc_jets[i]) for i,man in enumerate(self.jet_manifolds)]
             del x_jets
             
-            if self.n_part_man > 1:
+            if self.n_jet_man > 1:
                 x_out = torch.cat(x_jets_tan,dim=-1)
             else:
                 x_out = x_jets_tan[0]
-            
             
             # Final classification FC
             output = self.final_fc(x_out).squeeze(0)

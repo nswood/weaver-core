@@ -44,9 +44,9 @@ def _finalize_inputs(table, data_config):
     # stack variables for each input group
     for k, names in data_config.input_dicts.items():
         if len(names) == 1 and data_config.preprocess_params[names[0]]['length'] is None:
-            output['_' + k] = ak.to_numpy(ak.values_astype(table[names[0]], 'float32'))
+            output['_' + k] = ak.to_numpy(ak.values_astype(table[names[0]], 'float64'))
         else:
-            output['_' + k] = ak.to_numpy(np.stack([ak.to_numpy(table[n]).astype('float32') for n in names], axis=1))
+            output['_' + k] = ak.to_numpy(np.stack([ak.to_numpy(table[n]).astype('float64') for n in names], axis=1))
     # copy monitor variables (after transformation)
     for k in data_config.z_variables:
         if k in data_config.monitor_variables:

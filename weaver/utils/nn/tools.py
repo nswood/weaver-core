@@ -3,6 +3,8 @@ import awkward as ak
 import tqdm
 import time
 import torch
+import os
+import pandas as pd
 
 from collections import defaultdict, Counter
 from .metrics import evaluate_metrics
@@ -140,7 +142,7 @@ def train_classification(
 
 def evaluate_classification(model, test_loader, dev, epoch, for_training=True, loss_func=None, steps_per_epoch=None,
                             eval_metrics=['roc_auc_score', 'roc_auc_score_matrix', 'confusion_matrix'],
-                            tb_helper=None):
+                            tb_helper=None,args = None):
     model.eval()
 
     data_config = test_loader.dataset.config
@@ -227,7 +229,21 @@ def evaluate_classification(model, test_loader, dev, epoch, for_training=True, l
     metric_results = evaluate_metrics(labels[data_config.label_names[0]], scores, eval_metrics=eval_metrics)
     _logger.info('Evaluation metrics: \n%s', '\n'.join(
         ['    - %s: \n%s' % (k, str(v)) for k, v in metric_results.items()]))
+    
+#     print('SHOULD BE PRINTING')
+#     print(args.output_file_path)
+    if os.path.exists(args.output_file_path):
+        df = pd.read_csv(args.output_file_path)
+    else:
+        df = pd.DataFrame(columns=["epoch","acc", "loss", "auc"])
+    if epoch == None:
+        new_data = {"test_acc":total_correct / count, "test_loss":total_loss / count, "test_auc": metric_results['roc_auc_score']}
+    else:
+        new_data = {"epoch": epoch, "acc":total_correct / count, "loss":total_loss / count, "auc": metric_results['roc_auc_score']}
+    df = df.append(new_data, ignore_index=True)
+    df.to_csv(args.output_file_path, index=False)
 
+    
     if for_training:
         return total_correct / count
     else:
@@ -244,6 +260,8 @@ def evaluate_classification(model, test_loader, dev, epoch, for_training=True, l
                 for k, v in labels.items():
                     labels[k] = v.reshape((entry_count, -1))
         observers = {k: _concat(v) for k, v in observers.items()}
+        
+        
         return total_correct / count, scores, labels, observers
 
 
@@ -391,7 +409,7 @@ def train_regression(
 def evaluate_regression(model, test_loader, dev, epoch, for_training=True, loss_func=None, steps_per_epoch=None,
                         eval_metrics=['mean_squared_error', 'mean_absolute_error', 'median_absolute_error',
                                       'mean_gamma_deviance'],
-                        tb_helper=None):
+                        tb_helper=None,args = None):
     model.eval()
 
     data_config = test_loader.dataset.config
