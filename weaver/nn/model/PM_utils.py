@@ -46,7 +46,11 @@ class Manifold_Linear(nn.Module):
         
     
     def reset_parameters(self):
-        init.kaiming_uniform_(self.weight, a=0.01)
+        if self.ball.name == 'Euclidean':
+            init.kaiming_uniform_(self.weight, a=0.001)
+        else:
+            init.kaiming_uniform_(self.weight, a=0.0001)
+            
         if self.bias is not None:
             fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
             bound = 1 / math.sqrt(fan_in)

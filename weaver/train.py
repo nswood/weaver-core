@@ -19,7 +19,10 @@ from weaver.utils.import_tools import import_module
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--regression-mode', action='store_true', default=False,
-                    help='run in regression mode if this flag is set; otherwise run in classification mode')
+                    help='run in regression mode if this flag is set; if no flag, run in classification mode')
+parser.add_argument('--embedding-mode', action='store_true', default=False,
+                    help='run in embedding mode if this flag is set; if no flag, run in classification mode')
+
 parser.add_argument('-c', '--data-config', type=str,
                     help='data config YAML file')
 parser.add_argument('--extra-selection', type=str, default=None,
@@ -489,8 +492,9 @@ def optim(args, model, device):
         from lion_pytorch.Rlion_pytorch import RLion
         opt = RLion(parameters, lr=args.start_lr,**optimizer_options)
     elif args.optimizer == 'r_adam':
-        from geoopt.optim.RiemannianAdam import RiemannianAdam as radam
-        opt = radam(parameters, lr=args.start_lr,**optimizer_options)
+        import geoopt
+        from geoopt.optim.radam import RiemannianAdam as radam
+        opt = radam(parameters, lr=args.start_lr,amsgrad = False, stabilize = 1, **optimizer_options)
     elif args.optimizer == 'adam':
         opt = torch.optim.Adam(parameters, lr=args.start_lr, **optimizer_options)
     elif args.optimizer == 'adamW':
@@ -747,6 +751,11 @@ def _main(args):
         _logger.info('Running in regression mode')
         from weaver.utils.nn.tools import train_regression as train
         from weaver.utils.nn.tools import evaluate_regression as evaluate
+    elif args.embedding_mode:
+        _logger.info('Running in embedding mode')
+        from weaver.utils.nn.tools import train_embedding as train
+        from weaver.utils.nn.tools import evaluate_embedding as evaluate
+
     else:
         _logger.info('Running in classification mode')
         from weaver.utils.nn.tools import train_classification as train
@@ -844,7 +853,10 @@ def _main(args):
         if not os.path.exists(output_metric_dir):
             os.makedirs(output_metric_dir)
         output_file_name = args.tensorboard
-        output_file_path = os.path.join(output_metric_dir, f"{output_file_name}_performance.csv")
+        if args.embedding_mode:
+            output_file_path = os.path.join(output_metric_dir, f"{output_file_name}_embedding_performance.csv")
+        else:
+            output_file_path = os.path.join(output_metric_dir, f"{output_file_name}_performance.csv")
         args.output_file_path = output_file_path
         
         
