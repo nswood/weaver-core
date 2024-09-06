@@ -26,6 +26,20 @@ import tqdm
 import math
 from scipy.special import beta
 
+
+from geoopt.manifolds.stereographic.math import mobius_fn_apply
+
+  
+class Mob_Act(nn.Module):
+    def __init__(self,fn, man):
+        super().__init__()
+        self.fn = fn
+        self.man = man
+
+    def forward(self, x):
+        return self.man.expmap0(self.fn(self.man.logmap0(x)))
+
+
 # Naive Manifold_Linear
 class Manifold_Linear(nn.Module):
     def __init__(self, in_features, out_features, ball, bias=True):
@@ -47,9 +61,9 @@ class Manifold_Linear(nn.Module):
     
     def reset_parameters(self):
         if self.ball.name == 'Euclidean':
-            init.kaiming_uniform_(self.weight, a=0.001)
-        else:
             init.kaiming_uniform_(self.weight, a=0.0001)
+        else:
+            init.kaiming_uniform_(self.weight, a=0.000001)
             
         if self.bias is not None:
             fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
@@ -72,6 +86,7 @@ class Manifold_Linear(nn.Module):
         )
 
 
+    
 class ManifoldMHA(nn.Module):
     def __init__(self,hidden_size, num_attention_heads,  dropout,ball):
         super().__init__()

@@ -598,7 +598,6 @@ class PMTransformer(nn.Module):
         jets = jet_geom.split('x') if 'x' in jet_geom else [jet_geom]
         
         
-        dim_diff = total_jet_dim - total_part_dim
         for i, m in enumerate(jets):
             if m == 'R':
                 self.jet_manifolds.append(geoopt.Euclidean())
@@ -655,16 +654,17 @@ class PMTransformer(nn.Module):
         
         if fc_params is not None:
             self.jet_fc = nn.ModuleList()
+            self.jet_man_fc  = nn.ModuleList()
             if self.n_jet_man > 1:
                 self.w_man_att_jet = nn.ModuleList()
                 self.theta_man_att_jet = nn.ModuleList()
             for man in self.jet_manifolds:
                 fcs = []
                 in_dim = embed_dim * self.n_part_man
-                self.jet_fc.append(nn.Sequential(nn.Linear(in_dim, in_dim + int(dim_dif*0.5)), nn.ReLU()
-                                                 nn.Linear(in_dim + int(dim_dif*0.5), in_dim + int(dim_dif*0.75)), nn.ReLU()
+                self.jet_fc.append(nn.Sequential(nn.Linear(in_dim, in_dim + int(dim_dif*0.5)), nn.ReLU(),
+                                                 nn.Linear(in_dim + int(dim_dif*0.5), in_dim + int(dim_dif*0.75)), nn.ReLU(),
                                                  nn.Linear(in_dim + int(dim_dif*0.75), jet_dim), nn.ReLU()))
-                self.jet_man_fc.append(nn.Sequential(Manifold_Linear(jet_dim, jet_dim, ball = man), nn.ReLU()
+                self.jet_man_fc.append(nn.Sequential(Manifold_Linear(jet_dim, jet_dim, ball = man), nn.ReLU(),
                                                  Manifold_Linear(jet_dim, jet_dim, ball = man)))
 #                 for out_dim, drop_rate in fc_params:
 # #                     fcs.append(nn.Sequential(Manifold_Linear(in_dim, out_dim, ball = man), nn.ReLU(), nn.Dropout(drop_rate)))
@@ -759,7 +759,7 @@ class PMTransformer(nn.Module):
             x_jets = [self.jet_fc[i](x_jets[i]) for i in range(self.n_jet_man)]
             
             # Map to Jet Manifold
-            x_jets = [man.expmap0(x_jets) for man in self.jet_manifolds]
+            x_jets = [man.expmap0(x_jets[i]) for i, man in enumerate(self.jet_manifolds)]
             del x_cls
             
             x_jets = [self.jet_man_fc[i](x_jets[i]) for i in range(self.n_jet_man)]
@@ -841,18 +841,18 @@ class PMTransformerEmbedder(nn.Module):
             if m == 'R':
                 self.part_manifolds.append(geoopt.Euclidean())
             elif m == 'H':
-                self.part_manifolds.append(geoopt.PoincareBallExact(c=2.0, learnable=True))
+                self.part_manifolds.append(geoopt.PoincareBall(c=1.0, learnable=True))
             elif m == 'S':
-                self.part_manifolds.append(geoopt.SphereProjectionExact(k=2.0, learnable=True))
+                self.part_manifolds.append(geoopt.SphereProjection(k=1.0, learnable=True))
         jets = jet_geom.split('x') if 'x' in jet_geom else [jet_geom]
 
         for i, m in enumerate(jets):
             if m == 'R':
                 self.jet_manifolds.append(geoopt.Euclidean())
             elif m == 'H':
-                self.jet_manifolds.append(geoopt.PoincareBallExact(c=2.0, learnable=True))
+                self.jet_manifolds.append(geoopt.PoincareBall(c=1.0, learnable=True))
             elif m == 'S':
-                self.jet_manifolds.append(geoopt.SphereProjectionExact(k=2.0, learnable=True))
+                self.jet_manifolds.append(geoopt.SphereProjection(k=1.0, learnable=True))
 
         self.n_part_man = len(self.part_manifolds)
         self.n_jet_man = len(self.jet_manifolds)

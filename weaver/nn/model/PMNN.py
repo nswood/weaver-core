@@ -347,7 +347,6 @@ class PMBlock(nn.Module):
         
 
     
-    
 class PMNN(nn.Module):
 
     def __init__(self,
@@ -372,33 +371,78 @@ class PMNN(nn.Module):
         print('Classes')
         print(num_classes)
         
+        
+        self.r = 0.6
         self.part_manifolds = nn.ModuleList()
         parts = part_geom.split('x') if 'x' in part_geom else [part_geom]
         embed_dims = [part_dim, part_dim, part_dim] #embed_dims=[128, 512, 128]
         self.act = nn.ReLU()
+        
         self.n_man = len(parts)
         for i, m in enumerate(parts):
             if m == 'R':
                 self.part_manifolds.append(geoopt.Euclidean())
             elif m == 'H':
-                self.part_manifolds.append(geoopt.PoincareBallExact(c=1.0, learnable=True))
+                self.part_manifolds.append(geoopt.PoincareBall(c=1.2, learnable=True))
             elif m == 'S':
-                self.part_manifolds.append(geoopt.SphereProjectionExact(k=1.0, learnable=True))
+                self.part_manifolds.append(geoopt.SphereProjection(k=1.0, learnable=True))
         
         self.fc1 = nn.ModuleList()
+        self.fc2 = nn.ModuleList()
+#         self.fc1 = nn.ModuleList()
+#         self.fc2 = nn.ModuleList()
+        
+#         if self.n_man > 1:
+#             self.w_man_att = nn.ModuleList()
+#             self.theta_man_att = nn.ModuleList()
+#         dim_dif = part_dim - input_dim
+#         for man in self.part_manifolds:
+#             self.fc1.append(nn.Sequential(
+#                 nn.Linear(input_dim, int(input_dim + dim_dif*0.5)),
+#                 nn.ReLU(),
+#                 nn.Linear(int(input_dim + dim_dif*0.5), int(input_dim + dim_dif*0.75)),
+#                 nn.ReLU(),
+#                 nn.Linear(int(input_dim + dim_dif*0.75), part_dim)))
+#             if man.name =='Euclidean':
+#                 self.fc2.append(nn.Sequential(
+#                     Manifold_Linear(part_dim, part_dim,ball = man),
+#                     nn.ReLU(),
+#                     Manifold_Linear(part_dim, part_dim,ball = man),
+#                     nn.ReLU(),
+#                     Manifold_Linear(part_dim, part_dim,ball = man)))
+#             else:
+#                 self.fc2.append(nn.Sequential(
+#                     Manifold_Linear(part_dim, part_dim,ball = man),
+#                     Mob_Act(nn.ReLU(), man),
+#                     Manifold_Linear(part_dim, part_dim,ball = man),
+#                     Mob_Act(nn.ReLU(), man),
+#                     Manifold_Linear(part_dim, part_dim,ball = man)
+#                                    ))
         if self.n_man > 1:
             self.w_man_att = nn.ModuleList()
             self.theta_man_att = nn.ModuleList()
-        
+        dim_dif = part_dim - input_dim
         for man in self.part_manifolds:
             if man.name =='Euclidean':
-                self.fc1.append(nn.Sequential(Manifold_Linear(input_dim, part_dim,ball = man),nn.ReLU(),
-                                             Manifold_Linear(part_dim, part_dim,ball = man),nn.ReLU(),
-                                             Manifold_Linear(part_dim, part_dim,ball = man)))
+                self.fc1.append(nn.Sequential(
+                    Manifold_Linear(input_dim, int(input_dim + dim_dif*0.5),ball = man),
+                    nn.ReLU(),
+                    Manifold_Linear(int(input_dim + dim_dif*0.5), int(input_dim + dim_dif*0.75),ball = man),
+                    nn.ReLU(),
+                    Manifold_Linear(int(input_dim + dim_dif*0.75), part_dim,ball = man)))
             else:
-                self.fc1.append(nn.Sequential(Manifold_Linear(input_dim, part_dim,ball = man),
-                                             Manifold_Linear(part_dim, part_dim,ball = man),
-                                             Manifold_Linear(part_dim, part_dim,ball = man)))
+                 
+                self.fc1.append(nn.Sequential(
+                    Manifold_Linear(input_dim, int(input_dim + dim_dif*0.5),ball = man),
+                    Mob_Act(nn.ReLU(), man),
+                    Manifold_Linear(int(input_dim + dim_dif*0.5), int(input_dim + dim_dif*0.75), ball = man),
+                    Mob_Act(nn.ReLU(), man),
+                    Manifold_Linear(int(input_dim + dim_dif*0.75), part_dim,ball = man)
+                                   ))
+                                   
+#                 self.fc1.append(nn.Sequential(Manifold_Linear(input_dim, part_dim,ball = man),
+#                                              Manifold_Linear(part_dim, part_dim,ball = man),
+#                                              Manifold_Linear(part_dim, part_dim,ball = man)))
                 
             if self.n_man > 1:
                 self.w_man_att.append(Manifold_Linear(part_dim, part_dim ,ball = man))
@@ -432,6 +476,9 @@ class PMNN(nn.Module):
         with torch.cuda.amp.autocast(enabled=self.use_amp):
             pm_x = []
             for i,man in enumerate(self.part_manifolds):
+#                 if 'Poincare' in self.part_manifolds[i].name:
+                    #Clamp
+#                     x = torch.clamp(self.r/x.norm(dim=2), max = -1).unsqueeze(-1)*x
                 pm_x.append(man.expmap0(x))
                 
             output = []

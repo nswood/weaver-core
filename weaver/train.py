@@ -855,8 +855,13 @@ def _main(args):
         output_file_name = args.tensorboard
         if args.embedding_mode:
             output_file_path = os.path.join(output_metric_dir, f"{output_file_name}_embedding_performance.csv")
+        elif 'PMNN' in output_file_name:
+            from datetime import datetime
+            current_datetime = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_file_path = os.path.join(output_metric_dir, f"{output_file_name}_performance_{current_datetime}.csv")
         else:
-            output_file_path = os.path.join(output_metric_dir, f"{output_file_name}_performance.csv")
+            output_file_path = os.path.join(output_metric_dir, f"{output_file_name}_performance_{datetime}.csv")
+            
         args.output_file_path = output_file_path
         
         
