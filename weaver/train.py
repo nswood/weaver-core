@@ -22,7 +22,6 @@ parser.add_argument('--regression-mode', action='store_true', default=False,
                     help='run in regression mode if this flag is set; if no flag, run in classification mode')
 parser.add_argument('--embedding-mode', action='store_true', default=False,
                     help='run in embedding mode if this flag is set; if no flag, run in classification mode')
-
 parser.add_argument('-c', '--data-config', type=str,
                     help='data config YAML file')
 parser.add_argument('--extra-selection', type=str, default=None,
@@ -715,6 +714,75 @@ def save_root(args, output_path, data_config, scores, labels, observers):
         except Exception as e:
             _logger.error('Error when writing output parquet file: \n' + str(e))
 
+def save_root_embedding_space(args, output_path, data_config, all_man_embed, all_tan_embed, all_labels):
+    """
+    Saves manifold and tangent space embeddings along with labels to a .root file.
+
+    :param args:
+    :param output_path:
+    :param data_config:
+    :param all_man_embed: List over batches, each containing a list of tensors (manifold embeddings for each space)
+    :param all_tan_embed: List over batches, each containing a list of tensors (tangent embeddings for each space)
+    :param all_labels: List of tensors (labels for each batch)
+    :return:
+    """
+    import numpy as np
+    import awkward as ak
+    from weaver.utils.data.fileio import _write_root
+
+    output = {}
+
+    # Determine the number of manifolds (spaces)
+    num_manifolds = len(all_man_embed[0])  # Assumes at least one batch and that all batches have the same number of manifolds
+
+    # Initialize lists to collect embeddings for each manifold
+    man_embeds_per_space = [[] for _ in range(num_manifolds)]
+    tan_embeds_per_space = [[] for _ in range(num_manifolds)]
+
+    # Collect embeddings per manifold across all batches
+    for batch_embeds in all_man_embed:
+        for i, embed in enumerate(batch_embeds):
+            man_embeds_per_space[i].append(embed.cpu().numpy())
+
+    for batch_embeds in all_tan_embed:
+        for i, embed in enumerate(batch_embeds):
+            tan_embeds_per_space[i].append(embed.cpu().numpy())
+
+    # Stack embeddings for each manifold
+    for i in range(num_manifolds):
+        # Stack embeddings along the first dimension (samples)
+        man_embeds_array = np.vstack(man_embeds_per_space[i])
+        tan_embeds_array = np.vstack(tan_embeds_per_space[i])
+
+        # Add to output dictionary with keys indicating the manifold index
+        output[f'manifold_embedding_{i}'] = man_embeds_array
+        output[f'tangent_embedding_{i}'] = tan_embeds_array
+
+    # Process and concatenate labels
+    labels_array = np.concatenate([tensor.cpu().numpy() for tensor in all_labels])
+    output['labels'] = labels_array
+
+    # Create Awkward Array
+    ak_array = ak.Array(output)
+
+    try:
+        _write_root(output_path, ak_array)
+        _logger.info('Written output to %s' % output_path, color='bold')
+    except Exception as e:
+        _logger.error('Error when writing output ROOT file: \n' + str(e))
+
+    # Check if any array has more than 2 dimensions for parquet saving
+    save_as_parquet = any(len(v.shape) > 2 for v in output.values())
+    if save_as_parquet:
+        try:
+            ak.to_parquet(
+                ak_array,
+                output_path.replace('.root', '.parquet'),
+                compression='LZ4', compression_level=4)
+            _logger.info('Written alternative output file to %s' %
+                         output_path.replace('.root', '.parquet'), color='bold')
+        except Exception as e:
+            _logger.error('Error when writing output parquet file: \n' + str(e))
 
 def save_parquet(args, output_path, scores, labels, observers):
     """
@@ -866,7 +934,11 @@ def _main(args):
         
         
         # training loop
-        best_valid_metric = np.inf if args.regression_mode else 0
+        if args.regression_mode or args.embedding_mode:
+            best_valid_metric = np.inf
+        else:
+            best_valid_metric = 0
+        
         grad_scaler = torch.cuda.amp.GradScaler() if args.use_amp else None
         for epoch in range(args.num_epochs):
             if args.load_epoch is not None:
@@ -891,9 +963,10 @@ def _main(args):
             _logger.info('Epoch #%d validating' % epoch)
             valid_metric = evaluate(model, val_loader, dev, epoch, loss_func=loss_func,
                                     steps_per_epoch=args.steps_per_epoch_val, tb_helper=tb,args = args)
-            is_best_epoch = (
-                valid_metric < best_valid_metric) if args.regression_mode else(
-                valid_metric > best_valid_metric)
+            if args.regression_mode or args.embedding_mode:
+                is_best_epoch = valid_metric < best_valid_metric
+            else:
+                is_best_epoch = valid_metric > best_valid_metric
             if is_best_epoch:
                 best_valid_metric = valid_metric
                 if args.model_prefix and (args.backend is None or local_rank == 0):
@@ -939,9 +1012,13 @@ def _main(args):
                 from weaver.utils.nn.tools import evaluate_onnx
                 test_metric, scores, labels, observers = evaluate_onnx(args.model_prefix, test_loader)
             else:
-                test_metric, scores, labels, observers = evaluate(
-                    model, test_loader, dev, epoch=None, for_training=False, tb_helper=tb, args = args)
-            _logger.info('Test metric %.5f' % test_metric, color='bold')
+                if args.embedding_mode:
+                    all_man_embed,all_tan_embed,all_labels = evaluate(
+                        model, test_loader, dev, epoch=None, for_training=False, tb_helper=tb, args = args)
+                else:
+                    test_metric, scores, labels, observers = evaluate(
+                        model, test_loader, dev, epoch=None, for_training=False, tb_helper=tb, args = args)
+                    _logger.info('Test metric %.5f' % test_metric, color='bold')
             del test_loader
 
             if args.predict_output:
@@ -958,7 +1035,11 @@ def _main(args):
                     base, ext = os.path.splitext(predict_output)
                     output_path = base + '_' + name + ext
                 if output_path.endswith('.root'):
-                    save_root(args, output_path, data_config, scores, labels, observers)
+                    if args.embedding_mode:
+                        output_path = base + '_' + 'embedding' + ext
+                        save_root_embedding_space(args, output_path, data_config, all_man_embed, all_tan_embed, all_labels)
+                    else:
+                        save_root(args, output_path, data_config, scores, labels, observers)
                 else:
                     save_parquet(args, output_path, scores, labels, observers)
 

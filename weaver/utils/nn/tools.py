@@ -277,6 +277,7 @@ def train_embedding(
     total_loss = 0
     num_batches = 0
     count = 0
+    entry_count = 0
     start_time = time.time()
     with tqdm.tqdm(train_loader) as tq:
         for X, y, _ in tq:
@@ -289,9 +290,9 @@ def train_embedding(
                 mask = None
             opt.zero_grad()
             with torch.cuda.amp.autocast(enabled=grad_scaler is not None):
-                model_output = model(*inputs)
-                logits, label, _ = _flatten_preds(model_output, label=label, mask=mask)
-                loss = loss_func(logits, label)
+                embedding, tan_embedding,manifolds = model(*inputs,embed = True)
+                label = torch.tensor(label)
+                loss = loss_func(embedding, tan_embedding, label,manifolds)
             if grad_scaler is None:
                 loss.backward()
                 opt.step()
@@ -349,7 +350,7 @@ def train_embedding(
 
 
 def evaluate_embedding(model, test_loader, dev, epoch, for_training=True, loss_func=None, steps_per_epoch=None,
-                            eval_metrics=['roc_auc_score', 'roc_auc_score_matrix', 'confusion_matrix'],
+                            eval_metrics=[],
                             tb_helper=None,args = None):
     model.eval()
 
@@ -364,6 +365,9 @@ def evaluate_embedding(model, test_loader, dev, epoch, for_training=True, loss_f
     labels_counts = []
     observers = defaultdict(list)
     start_time = time.time()
+    all_man_embed = []
+    all_tan_embed = []
+    all_labels = []
     with torch.no_grad():
         with tqdm.tqdm(test_loader) as tq:
             for X, y, Z in tq:
@@ -375,13 +379,17 @@ def evaluate_embedding(model, test_loader, dev, epoch, for_training=True, loss_f
                     mask = y[data_config.label_names[0] + '_mask'].bool().to(dev)
                 except KeyError:
                     mask = None
-                model_output = model(*inputs)
-                logits, label, mask = _flatten_preds(model_output, label=label, mask=mask)
+                embedding, tan_embedding,manifolds = model(*inputs,embed = True)
+                label = torch.tensor(label)
+                if not for_training and entry_count < 50000:
+                    all_man_embed.append(embedding)
+                    all_tan_embed.append(tan_embedding)
+                    all_labels.append(label)
 
                 if mask is not None:
                     mask = mask.cpu()
-                for k, v in y.items():
-                    labels[k].append(_flatten_label(v, mask).numpy(force=True))
+#                 for k, v in y.items():
+#                     labels[k].append(_flatten_label(v, mask).numpy(force=True))
                 if not for_training:
                     for k, v in Z.items():
                         observers[k].append(v)
@@ -390,8 +398,8 @@ def evaluate_embedding(model, test_loader, dev, epoch, for_training=True, loss_f
                 label_counter.update(label.numpy(force=True))
                 if not for_training and mask is not None:
                     labels_counts.append(np.squeeze(mask.numpy(force=True).sum(axis=-1)))
-
-                loss = 0 if loss_func is None else loss_func(logits, label).item()
+#                 labels = torch.tensor(labels)
+                loss = 0 if loss_func is None else loss_func(embedding, tan_embedding, label,manifolds).item()
 
                 num_batches += 1
                 count += num_examples
@@ -423,9 +431,10 @@ def evaluate_embedding(model, test_loader, dev, epoch, for_training=True, loss_f
             with torch.no_grad():
                 tb_helper.custom_fn(model_output=model_output, model=model, epoch=epoch, i_batch=-1, mode=tb_mode)
 
-    scores = np.concatenate(scores)
     labels = {k: _concat(v) for k, v in labels.items()}
-    metric_results = evaluate_metrics(labels[data_config.label_names[0]], scores, eval_metrics=eval_metrics)
+#     metric_results = evaluate_metrics(labels[data_config.label_names[0]], scores, eval_metrics=eval_metrics)
+    metric_results = {}
+    metric_results['test_loss'] = total_loss / count
     _logger.info('Evaluation metrics: \n%s', '\n'.join(
         ['    - %s: \n%s' % (k, str(v)) for k, v in metric_results.items()]))
     
@@ -442,8 +451,11 @@ def evaluate_embedding(model, test_loader, dev, epoch, for_training=True, loss_f
 
     
     if for_training:
-        return total_correct / count
-    else:
+        return total_loss / count
+    if args.embedding_mode:
+        return all_man_embed,all_tan_embed,all_labels
+
+    if not for_training:
         # convert 2D labels/scores
         if len(scores) != entry_count:
             if len(labels_counts):
@@ -458,8 +470,7 @@ def evaluate_embedding(model, test_loader, dev, epoch, for_training=True, loss_f
                     labels[k] = v.reshape((entry_count, -1))
         observers = {k: _concat(v) for k, v in observers.items()}
         
-        
-        return total_correct / count, scores, labels, observers
+        return _, scores, labels, observers,all_man_embed,all_tan_embed,all_labels
     
     
 def evaluate_onnx(model_path, test_loader, eval_metrics=['roc_auc_score', 'roc_auc_score_matrix', 'confusion_matrix']):

@@ -120,9 +120,11 @@ class ManifoldMHA(nn.Module):
         if value is None:
             value = query
         #Shape: # Parts x Batch x Embed
+        
         query = query.permute(1,0,2)
         key = key.permute(1,0,2)
         value = value.permute(1,0,2)
+#         print(key.shape)
         
         
         #Shape: # Batch x Parts x Embed
@@ -164,7 +166,7 @@ class ManifoldMHA(nn.Module):
             # Expand mask to [batch_size, num_heads, 1, seq_len] and then subtract a large value where the mask is True
             key_padding_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1, seq_len]
             attention_scores = attention_scores.masked_fill(key_padding_mask, float('-inf'))
-            
+        
         # Apply the attn_mask if provided
         if attn_mask is not None:
             attn_mask = attn_mask.reshape(query.shape[0], self.num_attention_heads, nparts, nparts)

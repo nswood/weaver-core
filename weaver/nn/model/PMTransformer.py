@@ -468,10 +468,10 @@ class PMBlock(nn.Module):
                 residual = x
                 x = man.expmap0(self.pre_attn_norm[i](man.logmap0(x)))
                 x = man.projx(x)
+#                 print(x.shape)
                 x = self.attn[i](x, x, x, key_padding_mask=padding_mask,
                               attn_mask=attn_mask)[0]  # (seq_len, batch, embed_dim)
                 x = man.projx(x)
-                
     
             if self.post_attn_norm is not None and man.name == 'Euclidean':
                 x = self.post_attn_norm(x)
@@ -548,9 +548,9 @@ class PMTransformer(nn.Module):
             if m == 'R':
                 self.part_manifolds.append(geoopt.Euclidean())
             elif m == 'H':
-                self.part_manifolds.append(geoopt.PoincareBallExact(c=2.0, learnable=True))
+                self.part_manifolds.append(geoopt.PoincareBallExact(c=1.2, learnable=True))
             elif m == 'S':
-                self.part_manifolds.append(geoopt.SphereProjectionExact(k=2.0, learnable=True))
+                self.part_manifolds.append(geoopt.SphereProjectionExact(k=1, learnable=True))
         jets = jet_geom.split('x') if 'x' in jet_geom else [jet_geom]
         
         
@@ -558,9 +558,9 @@ class PMTransformer(nn.Module):
             if m == 'R':
                 self.jet_manifolds.append(geoopt.Euclidean())
             elif m == 'H':
-                self.jet_manifolds.append(geoopt.PoincareBallExact(c=2.0, learnable=True))
+                self.jet_manifolds.append(geoopt.PoincareBallExact(c=1.2, learnable=True))
             elif m == 'S':
-                self.jet_manifolds.append(geoopt.SphereProjectionExact(k=2.0, learnable=True))
+                self.jet_manifolds.append(geoopt.SphereProjectionExact(k=1.0, learnable=True))
 
         self.n_part_man = len(self.part_manifolds)
         self.n_jet_man = len(self.jet_manifolds)
@@ -573,7 +573,9 @@ class PMTransformer(nn.Module):
         self.for_inference = for_inference
         self.use_amp = use_amp
 
-        embed_dim = embed_dims[-1] if len(embed_dims) > 0 else input_dim
+#         embed_dim = embed_dims[-1] if len(embed_dims) > 0 else input_dim
+        embed_dim = input_dim#embed_dims[-1] if len(embed_dims) > 0 else input_dim
+        
         default_cfg = dict(embed_dim=embed_dim, num_heads=num_heads, ffn_ratio=1,
                            dropout=0.1, attn_dropout=0.1, activation_dropout=0.1,
                            add_bias_kv=False, activation=activation,
@@ -622,7 +624,7 @@ class PMTransformer(nn.Module):
                 if self.n_jet_man > 1:
                     self.w_man_att_jet.append(Manifold_Linear(out_dim, out_dim ,ball = man))
                     self.theta_man_att_jet.append(nn.Linear(out_dim, 1))
-            post_jet_dim = self.n_jet_man * in_dim
+            post_jet_dim = self.n_jet_man * jet_dim
             self.final_fc = nn.Sequential(nn.Linear(post_jet_dim, post_jet_dim), nn.ReLU(),
                                           nn.Linear(post_jet_dim, post_jet_dim), nn.ReLU(),
                                           nn.Linear(post_jet_dim, num_classes))
@@ -644,7 +646,7 @@ class PMTransformer(nn.Module):
     def no_weight_decay(self):
         return {'cls_token', }
 
-    def forward(self, x, v=None, mask=None, uu=None, uu_idx=None):
+    def forward(self, x, v=None, mask=None, uu=None, uu_idx=None, embed = False):
         # x: (N, C, P)
         # v: (N, 4, P) [px,py,pz,energy]
         # mask: (N, 1, P) -- real particle = 1, padded = 0
@@ -658,10 +660,13 @@ class PMTransformer(nn.Module):
             padding_mask = ~mask.squeeze(1)  # (N, P)
         with torch.cuda.amp.autocast(enabled=self.use_amp):
             # input embedding
-            x = self.embed(x).masked_fill(~mask.permute(2, 0, 1), 0)  # (P, N, C)
+            # Remove extreme preprocessing
+#             x = self.embed(x).masked_fill(~mask.permute(2, 0, 1), 0)  # (P, N, C)
+            x =x.permute(2,0, 1)
             attn_mask = None
             if (v is not None or uu is not None) and self.pair_embed is not None:
                 attn_mask = self.pair_embed(v, uu).view(-1, v.size(-1), v.size(-1))  # (N*num_heads, P, P)
+#                 print(attn_mask.shape)
             
 #             if 'Poincare' in man.name:
 #                     # r = 0.6
@@ -730,6 +735,11 @@ class PMTransformer(nn.Module):
                 proc_jets = x_jets
             
             x_jets_tan = [man.logmap0(proc_jets[i]) for i,man in enumerate(self.jet_manifolds)]
+            if embed:
+                proc_jets = [torch.squeeze(a,0) for a in proc_jets]
+                x_jets_tan = [torch.squeeze(a,0) for a in x_jets_tan]
+                
+                return proc_jets, x_jets_tan,list(self.jet_manifolds)
             del x_jets
             
             if self.n_jet_man > 1:
