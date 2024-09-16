@@ -95,6 +95,8 @@ class ManifoldMHA(nn.Module):
         
         self.hidden_size = hidden_size
         self.attention_head_size = hidden_size // num_attention_heads
+        
+        self.scaling_factor = self.attention_head_size ** 0.5
 
         self.query = Manifold_Linear(hidden_size, hidden_size, ball=self.ball)
         self.key = Manifold_Linear(hidden_size, hidden_size, ball=self.ball)
@@ -102,6 +104,9 @@ class ManifoldMHA(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
         self.sigmoid_fn = nn.Sigmoid()
+        
+        self.beta_ni = beta(self.attention_head_size / 2, 1 / 2)
+        self.beta_n = beta(self.hidden_size / 2, 1 / 2)
         
         self.is_flat = ball.name == 'Euclidean'
    
@@ -126,7 +131,6 @@ class ManifoldMHA(nn.Module):
         value = value.permute(1,0,2)
 #         print(key.shape)
         
-        
         #Shape: # Batch x Parts x Embed
         query_parts = query.size(1)
         nparts = key.size(1)  # Dynamically determine nparts based on the input size
@@ -136,14 +140,17 @@ class ManifoldMHA(nn.Module):
         
         query_layer = self.ball.logmap0(mixed_query_layer)
         query_layer = query_layer.view(-1, self.num_attention_heads, query_parts, self.attention_head_size)
+        query_layer = query_layer*self.beta_ni/self.beta_n
         query_layer = self.ball.expmap0(query_layer)
 
         key_layer = self.ball.logmap0(mixed_key_layer)
         key_layer = key_layer.view(-1, self.num_attention_heads, nparts, self.attention_head_size)
+        key_layer = key_layer*self.beta_ni/self.beta_n
         key_layer = self.ball.expmap0(key_layer)
 
         value_layer = self.ball.logmap0(mixed_value_layer)
         value_layer = value_layer.view(-1, self.num_attention_heads, nparts, self.attention_head_size)
+        value_layer = value_layer*self.beta_ni/self.beta_n
         value_layer = self.ball.expmap0(value_layer)
         
        
@@ -153,13 +160,14 @@ class ManifoldMHA(nn.Module):
         if self.is_flat:
             key_layer_transposed = key_layer.transpose(-1, -2)
             attention_scores = torch.matmul(query_layer, key_layer_transposed)
-            scaling_factor = self.attention_head_size ** 0.5
-            attention_scores =  attention_scores / scaling_factor
+            
+            attention_scores =  attention_scores / self.scaling_factor
 
         else:
             t1 = self.ball.mobius_add(-query_layer.unsqueeze(-2), key_layer.unsqueeze(-2).transpose(2, 3)).norm(dim=-1, p=-2)
             dist = 2.0 * artan_k(t1, k=self.ball.k)
-            attention_scores = -1 * dist
+            
+            attention_scores = -1 * dist / self.scaling_factor
         
         # Apply the key_padding_mask if provided
         if key_padding_mask is not None:
@@ -185,7 +193,7 @@ class ManifoldMHA(nn.Module):
         
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
-        context_layer = self.ball.logmap0(context_layer)
+        context_layer = self.ball.logmap0(context_layer)*self.beta_n/self.beta_ni
         context_layer = context_layer.view(new_context_layer_shape)
         context_layer = self.ball.expmap0(context_layer)
         context_layer = context_layer.permute(1,0,2)

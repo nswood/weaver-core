@@ -567,14 +567,14 @@ class PMTransformer(nn.Module):
         
         total_part_dim = part_dim * self.n_part_man
         
-        dim_dif = jet_dim - total_part_dim
+        
         
         self.trimmer = SequenceTrimmer(enabled=trim and not for_inference)
         self.for_inference = for_inference
         self.use_amp = use_amp
 
 #         embed_dim = embed_dims[-1] if len(embed_dims) > 0 else input_dim
-        embed_dim = input_dim#embed_dims[-1] if len(embed_dims) > 0 else input_dim
+        embed_dim = part_dim#embed_dims[-1] if len(embed_dims) > 0 else input_dim
         
         default_cfg = dict(embed_dim=embed_dim, num_heads=num_heads, ffn_ratio=1,
                            dropout=0.1, attn_dropout=0.1, activation_dropout=0.1,
@@ -600,13 +600,21 @@ class PMTransformer(nn.Module):
             pair_input_dim, pair_extra_dim, pair_embed_dims + [cfg_block['num_heads']],
             remove_self_pair=remove_self_pair, use_pre_activation_pair=use_pre_activation_pair,
             for_onnx=for_inference) if pair_embed_dims is not None and pair_input_dim + pair_extra_dim > 0 else None
+        
+        self.part_embedding = nn.ModuleList()
+        for man in self.part_manifolds:
+            self.part_embedding.append(nn.Sequential(Manifold_Linear(input_dim, part_dim, ball = man), Mob_Act(nn.ReLU(), man)))
+            
+            
         self.blocks = nn.ModuleList()
         for i in range(num_layers):
-            cfg_block['man_att'] =  (i !=0 and i %3 == 0)
+            cfg_block['man_att'] =  (i !=0 and i %2 == 0)
             self.blocks.append(PMBlock(**cfg_block))
             
         self.cls_blocks = nn.ModuleList([PMBlock(**cfg_cls_block) for _ in range(num_cls_layers)])
         
+        
+        dim_dif = jet_dim - total_part_dim
         if fc_params is not None:
             self.jet_fc = nn.ModuleList()
             self.jet_man_fc  = nn.ModuleList()
@@ -615,11 +623,11 @@ class PMTransformer(nn.Module):
                 self.theta_man_att_jet = nn.ModuleList()
             for man in self.jet_manifolds:
                 fcs = []
-                in_dim = embed_dim * self.n_part_man
+                in_dim = total_part_dim
                 self.jet_fc.append(nn.Sequential(nn.Linear(in_dim, in_dim + int(dim_dif*0.5)), nn.ReLU(),
                                                  nn.Linear(in_dim + int(dim_dif*0.5), in_dim + int(dim_dif*0.75)), nn.ReLU(),
                                                  nn.Linear(in_dim + int(dim_dif*0.75), jet_dim), nn.ReLU()))
-                self.jet_man_fc.append(nn.Sequential(Manifold_Linear(jet_dim, jet_dim, ball = man), nn.ReLU(),
+                self.jet_man_fc.append(nn.Sequential(Manifold_Linear(jet_dim, jet_dim, ball = man), Mob_Act(nn.ReLU(), man),
                                                  Manifold_Linear(jet_dim, jet_dim, ball = man)))
                 if self.n_jet_man > 1:
                     self.w_man_att_jet.append(Manifold_Linear(out_dim, out_dim ,ball = man))
@@ -666,7 +674,6 @@ class PMTransformer(nn.Module):
             attn_mask = None
             if (v is not None or uu is not None) and self.pair_embed is not None:
                 attn_mask = self.pair_embed(v, uu).view(-1, v.size(-1), v.size(-1))  # (N*num_heads, P, P)
-#                 print(attn_mask.shape)
             
 #             if 'Poincare' in man.name:
 #                     # r = 0.6
@@ -678,13 +685,16 @@ class PMTransformer(nn.Module):
             cls_tokens_parts = []
             for i,man in enumerate(self.part_manifolds):
                 cls_tokens = self.cls_token[i].expand(1, x.size(1), -1)
-                x_parts.append(man.expmap0(x))
+                x_parts.append(self.part_embedding[i](man.expmap0(x)))
                 cls_tokens_parts.append(cls_tokens)
             # extract class token
               # (1, N, C)
             
             del cls_tokens
             del x
+            
+            
+            
             # transform
             for block in self.blocks:
                 x_parts = block(x_parts, pm_x_cls=None, padding_mask=padding_mask, attn_mask=attn_mask)
