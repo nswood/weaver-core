@@ -38,6 +38,20 @@ class Mob_Act(nn.Module):
 
     def forward(self, x):
         return self.man.expmap0(self.fn(self.man.logmap0(x)))
+    
+class Mob_Res_Midpoint(nn.Module):
+    def __init__(self, man):
+        super().__init__()
+        self.man = man
+
+    def forward(self, parts,residuals):
+        part_lam_x = self.man.lambda_x(parts).unsqueeze(-1)
+        res_lam_x = self.man.lambda_x(residuals).unsqueeze(-1)
+        t1 = (parts * part_lam_x + residuals *res_lam_x)/(part_lam_x + res_lam_x -2)
+        mid = self.man.mobius_scalar_mul(torch.tensor(0.5),t1)
+        return mid
+
+
 
 
 # Naive Manifold_Linear
@@ -173,7 +187,7 @@ class ManifoldMHA(nn.Module):
             t1 = self.ball.mobius_add(-query_layer.unsqueeze(-2), key_layer.unsqueeze(-2).transpose(2, 3)).norm(dim=-1, p=2)
             dist = 2.0 * artan_k(t1, k=self.ball.k)/(abs(self.ball.k)**(0.5))
             
-            attention_scores = -1 * dist / self.scaling_factor
+            attention_scores = -1 * dist #/ self.scaling_factor
         
         # Apply the key_padding_mask if provided
         if key_padding_mask is not None:
