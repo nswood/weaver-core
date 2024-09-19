@@ -47,7 +47,9 @@ class Manifold_Linear(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.ball = ball
-        self.weight = geoopt.ManifoldParameter(torch.Tensor(out_features,in_features,),manifold=self.ball)
+        self.weight = nn.parameter.Parameter(torch.Tensor(out_features,in_features,))
+        
+#         self.weight = geoopt.ManifoldParameter(torch.Tensor(out_features,in_features,),manifold=self.ball)
         self.__params__ = self.in_features* self.out_features
         if bias: 
             self.__params__ += self.out_features
@@ -104,6 +106,10 @@ class ManifoldMHA(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
         self.sigmoid_fn = nn.Sigmoid()
+        self.softmax_fn = nn.Softmax(dim =-2)
+        
+        
+        
         
         self.beta_ni = beta(self.attention_head_size / 2, 1 / 2)
         self.beta_n = beta(self.hidden_size / 2, 1 / 2)
@@ -160,12 +166,12 @@ class ManifoldMHA(nn.Module):
         if self.is_flat:
             key_layer_transposed = key_layer.transpose(-1, -2)
             attention_scores = torch.matmul(query_layer, key_layer_transposed)
-            
             attention_scores =  attention_scores / self.scaling_factor
 
         else:
-            t1 = self.ball.mobius_add(-query_layer.unsqueeze(-2), key_layer.unsqueeze(-2).transpose(2, 3)).norm(dim=-1, p=-2)
-            dist = 2.0 * artan_k(t1, k=self.ball.k)
+            
+            t1 = self.ball.mobius_add(-query_layer.unsqueeze(-2), key_layer.unsqueeze(-2).transpose(2, 3)).norm(dim=-1, p=2)
+            dist = 2.0 * artan_k(t1, k=self.ball.k)/(abs(self.ball.k)**(0.5))
             
             attention_scores = -1 * dist / self.scaling_factor
         
@@ -180,7 +186,7 @@ class ManifoldMHA(nn.Module):
             attn_mask = attn_mask.reshape(query.shape[0], self.num_attention_heads, nparts, nparts)
             attention_scores += attn_mask
         attention_scores = torch.clamp(attention_scores, min=-1e10, max=1e10)
-        attention_probs = self.sigmoid_fn(attention_scores)
+        attention_probs = self.softmax_fn(attention_scores)
         attention_probs = self.dropout(attention_probs)
 
         if VERBOSE:
@@ -189,7 +195,7 @@ class ManifoldMHA(nn.Module):
         if self.is_flat:
             context_layer = torch.matmul(attention_probs, value_layer)
         else:
-            context_layer = self.ball.weighted_midpoint(value_layer, weights=attention_probs, reducedim=[-1], parts=query_parts, dim =-1)
+            context_layer = self.ball.weighted_midpoint(value_layer, weights=attention_probs, reducedim=[-1], parts=query_parts, dim =-1,posweight = True)
         
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)

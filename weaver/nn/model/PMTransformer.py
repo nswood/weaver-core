@@ -466,7 +466,7 @@ class PMBlock(nn.Module):
                 x = man.projx(x)
             else:
                 residual = x
-                x = man.expmap0(self.pre_attn_norm[i](man.logmap0(x)))
+#                 x = man.expmap0(self.pre_attn_norm[i](man.logmap0(x)))
                 x = man.projx(x)
 #                 print(x.shape)
                 x = self.attn[i](x, x, x, key_padding_mask=padding_mask,
@@ -480,7 +480,7 @@ class PMBlock(nn.Module):
             
             
             residual = x
-            x = man.expmap0(self.pre_fc_norm[i](man.logmap0(x)))
+#             x = man.expmap0(self.pre_fc_norm[i](man.logmap0(x)))
             x = man.projx(x)
             
             x = self.fc1[i](x)
@@ -548,9 +548,9 @@ class PMTransformer(nn.Module):
             if m == 'R':
                 self.part_manifolds.append(geoopt.Euclidean())
             elif m == 'H':
-                self.part_manifolds.append(geoopt.PoincareBallExact(c=1.2, learnable=True))
+                self.part_manifolds.append(geoopt.PoincareBall(c=1.2, learnable=True))
             elif m == 'S':
-                self.part_manifolds.append(geoopt.SphereProjectionExact(k=1, learnable=True))
+                self.part_manifolds.append(geoopt.SphereProjection(k=1, learnable=True))
         jets = jet_geom.split('x') if 'x' in jet_geom else [jet_geom]
         
         
@@ -558,9 +558,9 @@ class PMTransformer(nn.Module):
             if m == 'R':
                 self.jet_manifolds.append(geoopt.Euclidean())
             elif m == 'H':
-                self.jet_manifolds.append(geoopt.PoincareBallExact(c=1.2, learnable=True))
+                self.jet_manifolds.append(geoopt.PoincareBall(c=1.2, learnable=True))
             elif m == 'S':
-                self.jet_manifolds.append(geoopt.SphereProjectionExact(k=1.0, learnable=True))
+                self.jet_manifolds.append(geoopt.SphereProjection(k=1.0, learnable=True))
 
         self.n_part_man = len(self.part_manifolds)
         self.n_jet_man = len(self.jet_manifolds)
@@ -603,12 +603,12 @@ class PMTransformer(nn.Module):
         
         self.part_embedding = nn.ModuleList()
         for man in self.part_manifolds:
-            self.part_embedding.append(nn.Sequential(Manifold_Linear(input_dim, part_dim, ball = man), Mob_Act(nn.ReLU(), man)))
+            self.part_embedding.append(nn.Sequential(Manifold_Linear(input_dim, part_dim, ball = man)))
             
             
         self.blocks = nn.ModuleList()
         for i in range(num_layers):
-            cfg_block['man_att'] =  (i !=0 and i %2 == 0)
+            cfg_block['man_att'] =  (i !=0 and i %1 == 0)
             self.blocks.append(PMBlock(**cfg_block))
             
         self.cls_blocks = nn.ModuleList([PMBlock(**cfg_cls_block) for _ in range(num_cls_layers)])
