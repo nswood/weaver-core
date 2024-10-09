@@ -152,6 +152,21 @@ parser.add_argument('--jet-geom', type=str, default=None,
                     help='jet geometry for PM Transformer; input format: `H`,`R`,`S`, or PM such as `HxR`')
 parser.add_argument('--jet-dim', type=int, default=0,
                     help='dimension for each manifold in jet-level reperesentation')
+parser.add_argument('--equal-heads', action='store_true', default=False,
+                    help='If true, will enforce split number of normal transformer heads across PM representation equally. If false, each representation is given the default number of heads')
+
+parser.add_argument('--PM-weight-initialization-factor', type=float, default=1,
+                    help='Factor to initialize non-Euclidean weights relative to Euclidean')
+
+parser.add_argument('--dev-id',  type=str, default='NA',
+                    help='Name for testing model types')
+parser.add_argument('--att-metric',  type=str, default='dist',choices=['dist', 'tan_space'],
+                    help='Type of attention weight calculation for PM models: distance based or Euclidean attention in the T_0 M')
+parser.add_argument('--inter-man-att',  type=int, default=-1,
+                    help='Determines how often inter-manifold attention is applied. For input n, applies inter-manifold after every n^th PM block')
+parser.add_argument('--inter-man-att-method',  type=str, default='dist',choices=['v1', 'v2'],
+                    help='Determines which method of inter_manifold attention to use either v1 or v2')
+
 
 
 def to_filelist(args, mode='train'):
@@ -524,7 +539,9 @@ def optim(args, model, device):
                 opt, milestones=[lr_step, 2 * lr_step], gamma=0.1,
                 last_epoch=-1 if args.load_epoch is None else args.load_epoch)
         elif args.lr_scheduler == 'flat+decay':
-            num_decay_epochs = max(1, int(args.num_epochs * 0.3))
+#             num_decay_epochs = max(1, int(args.num_epochs * 0.3))
+            num_decay_epochs = max(1, int(args.num_epochs * 0.7))
+            
             milestones = list(range(args.num_epochs - num_decay_epochs, args.num_epochs))
             gamma = 0.01 ** (1. / num_decay_epochs)
             if len(names_lr_mult):
@@ -585,7 +602,11 @@ def model_setup(args, data_config, device='cpu'):
         
     args_dict = vars(args)
     # Filter the args_dict to only include specific keys
-    filtered_args_dict = {k: args_dict[k] for k in ['part_geom', 'part_dim', 'jet_geom', 'jet_dim'] if k in args_dict}
+    
+    
+
+    
+    filtered_args_dict = {k: args_dict[k] for k in ['part_geom', 'part_dim', 'jet_geom', 'jet_dim','equal_heads','PM_weight_initialization_factor','att_metric','inter_man_att','inter_man_att_method'] if k in args_dict}
 
     # Merge dictionaries
     combined_options = {**network_options, **filtered_args_dict}
@@ -917,9 +938,9 @@ def _main(args):
             return
         
         
-        output_metric_dir = args.data_config.split('/')[1]+'_performance_summary'
+        output_metric_dir = args.data_config.split('/')[1]+f'_performance_summary_{args.dev_id}'
         if not os.path.exists(output_metric_dir):
-            os.makedirs(output_metric_dir)
+            os.makedirs(output_metric_dir,exists_ok = True)
         output_file_name = args.tensorboard
         if args.embedding_mode:
             output_file_path = os.path.join(output_metric_dir, f"{output_file_name}_embedding_performance.csv")

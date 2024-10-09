@@ -375,67 +375,82 @@ class PairEmbed(nn.Module):
 import os
 os.environ['PYTHONPATH'] = '/n/home11/nswood/weaver-core/weaver/nn/model'
 
-from .PM_utils import *
+from weaver.nn.model.PM_utils import *
+from weaver.nn.model.riemannian_batch_norm import *
 
+def two_point_mid(x1,x2, man, w1,w2):
+    if man.name == 'Euclidean':
+        mid = (x1 * w1 + x2 * w2)/(w1 + w2)
+    else:
+        lam_x1 = man.lambda_x(x1).unsqueeze(-1)
+        lam_x2 = man.lambda_x(x2).unsqueeze(-1)
+        t1 = (x1 * lam_x1 *w1 + x2 *lam_x2 * w2)/(lam_x1*w1 + lam_x2*w2 -2)
+        mid = man.mobius_scalar_mul(torch.tensor(0.5),t1)
+    return mid
 
 
 class PMBlock(nn.Module):
     def __init__(self,manifolds, embed_dim=128, num_heads=8, ffn_ratio=4,
                  dropout=0.1, attn_dropout=0.1, activation_dropout=0.1,
                  add_bias_kv=False, activation='gelu',
-                 scale_fc=True, scale_attn=True, scale_heads=False, scale_resids=True,man_att = False):
+                 scale_fc=True, scale_attn=True, scale_heads=False, scale_resids=True,man_att = False,weight_init_ratio =1,att_metric = 'dist',inter_man_att_method = 'v1'):
         super().__init__()
         
         self.manifolds = manifolds
         self.n_man = len(manifolds)
         self.man_att = man_att
-        self.man_att_dim = embed_dim
+        self.man_att_dim = 2*embed_dim
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
         self.ffn_dim = embed_dim * ffn_ratio
+        self.inter_man_att_method = inter_man_att_method
     
         self.dropout = nn.Dropout(dropout)
-        self.act = nn.GELU() if activation == 'gelu' else nn.ReLU()
+        self.act = nn.ReLU()
         self.act_dropout = nn.Dropout(activation_dropout)
-        
-        
         
         self.pre_attn_norm = nn.ModuleList()
         self.pre_fc_norm = nn.ModuleList()
+        self.res_agg = nn.ModuleList()
+        
         
         self.fc1 = nn.ModuleList()
         self.fc2 = nn.ModuleList()
         self.attn = nn.ModuleList()
-        self.c_attn =nn.ParameterList() if scale_heads else None
-        self.w_resid = nn.ParameterList() if scale_resids else None
-        if self.n_man > 1:
+        if man_att and self.n_man > 1:
             self.w_man_att = nn.ModuleList() if man_att else None
             self.theta_man_att = nn.ModuleList() if man_att else None
         
         for man in manifolds:
-            self.fc1.append(nn.Sequential(Manifold_Linear(embed_dim, self.ffn_dim,ball = man), Mob_Act(nn.ReLU(), man)))
+            self.res_agg.append(Mob_Res_Midpoint(man))
+            self.fc1.append(nn.Sequential(Manifold_Linear(embed_dim, self.ffn_dim,ball = man, weight_init_ratio = weight_init_ratio), Mob_Act(nn.ReLU(), man)))
             
-            self.fc2.append(nn.Sequential(Manifold_Linear(self.ffn_dim, embed_dim,ball = man), Mob_Act(nn.ReLU(), man)))
+            self.fc2.append(nn.Sequential(Manifold_Linear(self.ffn_dim, embed_dim,ball = man, weight_init_ratio = weight_init_ratio), Mob_Act(nn.ReLU(), man)))
             
-            self.attn.append(ManifoldMHA(embed_dim,num_heads,dropout=attn_dropout, ball = man))
+            self.attn.append(ManifoldMHA(embed_dim,num_heads,dropout=attn_dropout, ball = man, weight_init_ratio = weight_init_ratio,att_metric = att_metric))
             
-            if scale_heads:
-                self.c_attn.append(nn.Parameter(torch.ones(num_heads), requires_grad=True))
-            if scale_resids:
-                self.w_resid.append(nn.Parameter(torch.ones(embed_dim), requires_grad=True))
-            if self.n_man > 1:
-                if self.man_att:
+            if self.man_att and self.n_man > 1:
+                
+                if inter_man_att_method == 'v1':
                     self.w_man_att.append(Manifold_Linear(embed_dim, self.man_att_dim ,ball = man))
                     self.theta_man_att.append(nn.Linear(self.man_att_dim, 1))
+                elif inter_man_att_method == 'v2':
+                    self.w_man_att.append(Manifold_Linear(embed_dim, embed_dim ,ball = man))
+                
+                
+                
+                
             if man.name == 'Euclidean':
-                self.post_attn_norm = nn.LayerNorm(embed_dim) if scale_attn else None
-                self.post_fc_norm = nn.LayerNorm(self.ffn_dim) if scale_fc else None
+                self.pre_attn_norm.append(nn.LayerNorm(embed_dim))
+                self.pre_fc_norm.append(nn.LayerNorm(embed_dim))
+            elif 'Poincare' in man.name:
+                self.pre_attn_norm.append(nn.LayerNorm(embed_dim))
+                self.pre_fc_norm.append(nn.LayerNorm(embed_dim))
             else:
-                self.post_attn_norm =  None
-                self.post_fc_norm =  None
-            self.pre_attn_norm.append(nn.LayerNorm(embed_dim))
-            self.pre_fc_norm.append(nn.LayerNorm(embed_dim))
+                self.pre_attn_norm.append(nn.LayerNorm(embed_dim))
+                self.pre_fc_norm.append(nn.LayerNorm(embed_dim))
+            
 
     def forward(self,  pm_x, pm_x_cls=None, padding_mask=None, attn_mask=None):
         """
@@ -452,58 +467,92 @@ class PMBlock(nn.Module):
         output = []
         for i, man in enumerate(self.manifolds):
             x = pm_x[i]
+            
             if pm_x_cls is not None:
                 x_cls = pm_x_cls[i]
                 with torch.no_grad():
                     # prepend one element for x_cls: -> (batch, 1+seq_len)
                     padding_mask_cur = torch.cat((torch.zeros_like(padding_mask[:, :1]), padding_mask), dim=1)
+                    
                 # class attention: https://arxiv.org/pdf/2103.17239.pdf
                 residual = x_cls
                 u = torch.cat((x_cls, x), dim=0)  # (seq_len+1, batch, embed_dim)
-                u = man.expmap0(self.pre_attn_norm[i](man.logmap0(u)))
                 u = man.projx(u)
+                if man.name == 'Euclidean':
+                    u = self.pre_attn_norm[i](u)
+                else:
+                    u = man.expmap0(self.pre_attn_norm[i](man.logmap0(u)))
+                    
                 x = self.attn[i](x_cls, u, u, key_padding_mask=padding_mask_cur)[0]  # (1, batch, embed_dim)
                 x = man.projx(x)
             else:
                 residual = x
-#                 x = man.expmap0(self.pre_attn_norm[i](man.logmap0(x)))
-                x = man.projx(x)
-#                 print(x.shape)
+                if man.name == 'Euclidean':
+                    x = self.pre_attn_norm[i](x)
+                else:
+                    x = man.expmap0(self.pre_attn_norm[i](man.logmap0(x)))
+                
                 x = self.attn[i](x, x, x, key_padding_mask=padding_mask,
                               attn_mask=attn_mask)[0]  # (seq_len, batch, embed_dim)
                 x = man.projx(x)
-    
-            if self.post_attn_norm is not None and man.name == 'Euclidean':
-                x = self.post_attn_norm(x)
-            x = man.mobius_add(x,residual)
-            x = man.projx(x)
+            
+            if man.name == 'Euclidean':
+                x = x + residual
+            else:
+                x = self.res_agg[i](x,residual)
+            
             
             
             residual = x
-#             x = man.expmap0(self.pre_fc_norm[i](man.logmap0(x)))
+            if man.name == 'Euclidean':
+                x = self.pre_fc_norm[i](x)
+            elif 'Poincare' in man.name:
+                x = man.expmap0(self.pre_attn_norm[i](man.logmap0(x)))
+            else:
+                x = man.expmap0(self.pre_fc_norm[i](man.logmap0(x)))
             x = man.projx(x)
-            
             x = self.fc1[i](x)
-            if self.post_fc_norm is not None and man.name == 'Euclidean':
-                x = self.post_fc_norm(x)
             x = self.act_dropout(x)
             x = self.fc2[i](x)
-
-            if self.w_resid is not None:
-                residual = man.mobius_scalar_mul(self.w_resid[i], residual)
-            x= man.mobius_add(x, residual)
+                
+            if man.name == 'Euclidean':
+                x = x + residual
+            else:
+                x = self.res_agg[i](x,residual)
             x = man.projx(x)
             output.append(x)
         
         if self.man_att and self.n_man > 1:
-            tan_output = [self.manifolds[i].logmap0(self.w_man_att[i](output[i])) for i in range(self.n_man)]
-            mu = torch.stack(tan_output)
-            mu = torch.mean(mu, dim=0)
-            inter_att = [self.theta_man_att[i](tan_output[i]-mu) for i in range(self.n_man)]
-            w_i = nn.Softmax(dim=0)(torch.stack(inter_att,dim =0))
-            proc_jets = []
-            for i in range(self.n_man):
-                proc_jets.append(self.manifolds[i].mobius_scalar_mul(w_i[i], output[i]))
+            if self.inter_man_att_method =='v1': 
+                tan_output = [self.manifolds[i].logmap0(self.w_man_att[i](output[i])) for i in range(self.n_man)]
+                mu = torch.stack(tan_output)
+                mu = torch.mean(mu, dim=0)
+                inter_att = [self.theta_man_att[i](tan_output[i]-mu) for i in range(self.n_man)]
+                w_i = nn.Softmax(dim=0)(torch.stack(inter_att,dim =0))
+                proc_jets = []
+                for i in range(self.n_man):
+                    proc_jets.append(self.manifolds[i].mobius_scalar_mul(w_i[i], output[i]))
+
+            elif self.inter_man_att_method =='v2':
+                tan_output = [self.manifolds[i].logmap0(output[i]) for i in range(self.n_man)]
+                mu = torch.stack(tan_output)
+                mu = torch.mean(mu, dim=0)
+                proj_mu = [self.w_man_att[i](self.manifolds[i].expmap0(mu)) for i in range(self.n_man)]
+                
+                # distance between x_i and mu projected onto M_i
+                d_i = []
+                for i in range(self.n_man):
+                    if self.manifolds[i].name =='Euclidean':
+                        d_i.append(torch.norm(output[i]-proj_mu[i],dim=-1))
+                    else:
+                        d_i.append(self.manifolds[i].dist(output[i],proj_mu[i]))
+
+                w_i = nn.Softmax(dim=0)(torch.stack(d_i,dim =0)).unsqueeze(-1)
+                proc_jets = []
+                for i in range(self.n_man):
+                    proc_jets.append(two_point_mid(output[i],proj_mu[i], self.manifolds[i],torch.ones(d_i[i].shape).to(d_i[i].device).unsqueeze(-1), d_i[i].unsqueeze(-1)))
+                    
+            output =  proc_jets
         return output
 
     
@@ -534,6 +583,11 @@ class PMTransformer(nn.Module):
                  trim=True,
                  for_inference=False,
                  use_amp=False,
+                 PM_weight_initialization_factor = 1, 
+                 att_metric = 'dist', 
+                 inter_man_att_method = 'v1',
+                 inter_man_att = -1,
+                 equal_heads = False, 
                  **kwargs) -> None:
         super().__init__(**kwargs)
         self.part_manifolds = nn.ModuleList()
@@ -567,20 +621,20 @@ class PMTransformer(nn.Module):
         
         total_part_dim = part_dim * self.n_part_man
         
-        
-        
         self.trimmer = SequenceTrimmer(enabled=trim and not for_inference)
         self.for_inference = for_inference
         self.use_amp = use_amp
 
-#         embed_dim = embed_dims[-1] if len(embed_dims) > 0 else input_dim
-        embed_dim = part_dim#embed_dims[-1] if len(embed_dims) > 0 else input_dim
-        
+        embed_dim = part_dim
+    
+        if equal_heads and self.n_part_man > 1: 
+            num_heads = int(num_heads/self.n_part_man)
         default_cfg = dict(embed_dim=embed_dim, num_heads=num_heads, ffn_ratio=1,
                            dropout=0.1, attn_dropout=0.1, activation_dropout=0.1,
                            add_bias_kv=False, activation=activation,
-                           scale_fc=True, scale_attn=True, scale_heads=False, scale_resids=True, 
-                           manifolds = self.part_manifolds,man_att = False)
+                           scale_fc=True, scale_attn=True, scale_heads=False, scale_resids=True, weight_init_ratio = PM_weight_initialization_factor,att_metric =att_metric,
+                           manifolds = self.part_manifolds,man_att = False,
+                          inter_man_att_method = inter_man_att_method)
 
         cfg_block = copy.deepcopy(default_cfg)
         
@@ -603,35 +657,33 @@ class PMTransformer(nn.Module):
         
         self.part_embedding = nn.ModuleList()
         for man in self.part_manifolds:
-            self.part_embedding.append(nn.Sequential(Manifold_Linear(input_dim, part_dim, ball = man)))
-            
+            self.part_embedding.append(nn.Sequential(Manifold_Linear(input_dim, part_dim, ball = man,weight_init_ratio = PM_weight_initialization_factor)))
             
         self.blocks = nn.ModuleList()
         for i in range(num_layers):
-            cfg_block['man_att'] =  (i !=0 and i %1 == 0)
+            cfg_block['man_att'] = (inter_man_att >= 0 and i != 0 and i % inter_man_att == 0)
             self.blocks.append(PMBlock(**cfg_block))
             
         self.cls_blocks = nn.ModuleList([PMBlock(**cfg_cls_block) for _ in range(num_cls_layers)])
-        
         
         dim_dif = jet_dim - total_part_dim
         if fc_params is not None:
             self.jet_fc = nn.ModuleList()
             self.jet_man_fc  = nn.ModuleList()
-            if self.n_jet_man > 1:
-                self.w_man_att_jet = nn.ModuleList()
-                self.theta_man_att_jet = nn.ModuleList()
+#             if self.n_jet_man > 1:
+#                 self.w_man_att_jet = nn.ModuleList()
+#                 self.theta_man_att_jet = nn.ModuleList()
             for man in self.jet_manifolds:
                 fcs = []
                 in_dim = total_part_dim
                 self.jet_fc.append(nn.Sequential(nn.Linear(in_dim, in_dim + int(dim_dif*0.5)), nn.ReLU(),
                                                  nn.Linear(in_dim + int(dim_dif*0.5), in_dim + int(dim_dif*0.75)), nn.ReLU(),
                                                  nn.Linear(in_dim + int(dim_dif*0.75), jet_dim), nn.ReLU()))
-                self.jet_man_fc.append(nn.Sequential(Manifold_Linear(jet_dim, jet_dim, ball = man), Mob_Act(nn.ReLU(), man),
-                                                 Manifold_Linear(jet_dim, jet_dim, ball = man)))
-                if self.n_jet_man > 1:
-                    self.w_man_att_jet.append(Manifold_Linear(out_dim, out_dim ,ball = man))
-                    self.theta_man_att_jet.append(nn.Linear(out_dim, 1))
+                self.jet_man_fc.append(nn.Sequential(Manifold_Linear(jet_dim, jet_dim, ball = man,weight_init_ratio = PM_weight_initialization_factor), Mob_Act(nn.ReLU(), man),
+                                                 Manifold_Linear(jet_dim, jet_dim, ball = man,weight_init_ratio = PM_weight_initialization_factor)))
+#                 if self.n_jet_man > 1:
+#                     self.w_man_att_jet.append(Manifold_Linear(out_dim, out_dim ,ball = man))
+#                     self.theta_man_att_jet.append(nn.Linear(out_dim, 1))
             post_jet_dim = self.n_jet_man * jet_dim
             self.final_fc = nn.Sequential(nn.Linear(post_jet_dim, post_jet_dim), nn.ReLU(),
                                           nn.Linear(post_jet_dim, post_jet_dim), nn.ReLU(),
@@ -660,6 +712,7 @@ class PMTransformer(nn.Module):
         # mask: (N, 1, P) -- real particle = 1, padded = 0
         # for pytorch: uu (N, C', num_pairs), uu_idx (N, 2, num_pairs)
         # for onnx: uu (N, C', P, P), uu_idx=None
+        
         with torch.no_grad():
             if not self.for_inference:
                 if uu_idx is not None:
@@ -693,8 +746,6 @@ class PMTransformer(nn.Module):
             del cls_tokens
             del x
             
-            
-            
             # transform
             for block in self.blocks:
                 x_parts = block(x_parts, pm_x_cls=None, padding_mask=padding_mask, attn_mask=attn_mask)
@@ -727,22 +778,22 @@ class PMTransformer(nn.Module):
             x_jets = [self.jet_man_fc[i](x_jets[i]) for i in range(self.n_jet_man)]
             
             
-            if self.n_jet_man > 1:
-                #Inspired arXiv:2112.05393v1 inspired operations
-                proc_log = [self.jet_manifolds[i].logmap0(self.w_man_att_jet[i](x_jets[i])) for i in range(self.n_jet_man)]
-                mu = torch.stack(proc_log)
-                mu = torch.mean(mu, dim=0)
-                inter_att = [self.theta_man_att_jet[i](proc_log[i]-mu) for i in range(self.n_jet_man)]
+#             if self.n_jet_man > 1:
+#                 #Inspired arXiv:2112.05393v1 inspired operations
+#                 proc_log = [self.jet_manifolds[i].logmap0(self.w_man_att_jet[i](x_jets[i])) for i in range(self.n_jet_man)]
+#                 mu = torch.stack(proc_log)
+#                 mu = torch.mean(mu, dim=0)
+#                 inter_att = [self.theta_man_att_jet[i](proc_log[i]-mu) for i in range(self.n_jet_man)]
 
-                w_i = nn.Softmax(dim=0)(torch.stack(inter_att,dim =0))
-                proc_jets = []
-                for i in range(self.n_jet_man):
-                    if self.jet_manifolds[i].name == 'Euclidean':
-                        proc_jets.append(w_i[i]*x_jets[i])
-                    else:
-                        proc_jets.append(self.jet_manifolds[i].mobius_scalar_mul(w_i[i], x_jets[i]))
-            else:
-                proc_jets = x_jets
+#                 w_i = nn.Softmax(dim=0)(torch.stack(inter_att,dim =0))
+#                 proc_jets = []
+#                 for i in range(self.n_jet_man):
+#                     if self.jet_manifolds[i].name == 'Euclidean':
+#                         proc_jets.append(w_i[i]*x_jets[i])
+#                     else:
+#                         proc_jets.append(self.jet_manifolds[i].mobius_scalar_mul(w_i[i], x_jets[i]))
+#             else:
+            proc_jets = x_jets
             
             x_jets_tan = [man.logmap0(proc_jets[i]) for i,man in enumerate(self.jet_manifolds)]
             if embed:
