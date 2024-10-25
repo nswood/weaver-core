@@ -5,6 +5,7 @@ import time
 import torch
 import os
 import pandas as pd
+from filelock import FileLock
 
 from collections import defaultdict, Counter
 from .metrics import evaluate_metrics
@@ -232,15 +233,22 @@ def evaluate_classification(model, test_loader, dev, epoch, for_training=True, l
     
 #     print('SHOULD BE PRINTING')
 #     print(args.output_file_path)
-    if not args.predict:
+    # Define the lock file (it will be a temporary file for locking purposes)
+    lock_path = args.output_file_path + ".lock"
+    lock = FileLock(lock_path)
+
+    # Use the lock to ensure safe read/write operations
+    with lock:
         if os.path.exists(args.output_file_path):
             df = pd.read_csv(args.output_file_path)
         else:
-            df = pd.DataFrame(columns=["epoch","acc", "loss", "auc"])
-        if epoch == None:
-            new_data = {"test_acc":total_correct / count, "test_loss":total_loss / count, "test_auc": metric_results['roc_auc_score']}
+            df = pd.DataFrame(columns=["epoch", "acc", "loss", "auc"])
+
+        if epoch is None:
+            new_data = {"test_acc": total_correct / count, "test_loss": total_loss / count, "test_auc": metric_results['roc_auc_score']}
         else:
-            new_data = {"epoch": epoch, "acc":total_correct / count, "loss":total_loss / count, "auc": metric_results['roc_auc_score']}
+            new_data = {"epoch": epoch, "acc": total_correct / count, "loss": total_loss / count, "auc": metric_results['roc_auc_score']}
+
         df = df.append(new_data, ignore_index=True)
         df.to_csv(args.output_file_path, index=False)
 

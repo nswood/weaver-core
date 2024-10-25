@@ -390,10 +390,27 @@ def two_point_mid(x1,x2, man, w1,w2):
 
 
 class PMBlock(nn.Module):
-    def __init__(self,manifolds, embed_dim=128, num_heads=8, ffn_ratio=4,
-                 dropout=0.1, attn_dropout=0.1, activation_dropout=0.1,
-                 add_bias_kv=False, activation='gelu',
-                 scale_fc=True, scale_attn=True, scale_heads=False, scale_resids=True,man_att = False,weight_init_ratio =1,att_metric = 'dist',inter_man_att_method = 'v1'):
+    def __init__(self,
+                 manifolds, 
+                 embed_dim=128, 
+                 num_heads=8, 
+                 ffn_ratio=4,
+                 dropout=0.1, 
+                 attn_dropout=0.1, 
+                 activation_dropout=0.1,
+                 add_bias_kv=False, 
+                 activation='gelu',
+                 scale_fc=True, 
+                 scale_attn=True, 
+                 scale_heads=False, 
+                 scale_resids=True,
+                 man_att = False,
+                 weight_init_ratio =1,
+                 att_metric = 'dist',
+                 inter_man_att_method = 'v2',
+                 base_resid_agg= False,
+                 base_activations = 'act',
+                 remove_pm_norm_layers=False):
         super().__init__()
         
         self.manifolds = manifolds
@@ -404,7 +421,11 @@ class PMBlock(nn.Module):
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
         self.ffn_dim = embed_dim * ffn_ratio
+        
         self.inter_man_att_method = inter_man_att_method
+        self.base_resid_agg = base_resid_agg
+        self.base_activations = base_activations
+        self.remove_pm_norm_layers = remove_pm_norm_layers
     
         self.dropout = nn.Dropout(dropout)
         self.act = nn.ReLU()
@@ -414,19 +435,39 @@ class PMBlock(nn.Module):
         self.pre_fc_norm = nn.ModuleList()
         self.res_agg = nn.ModuleList()
         
-        
+
         self.fc1 = nn.ModuleList()
         self.fc2 = nn.ModuleList()
         self.attn = nn.ModuleList()
         if man_att and self.n_man > 1:
             self.w_man_att = nn.ModuleList() if man_att else None
             self.theta_man_att = nn.ModuleList() if man_att else None
+            
+        if inter_man_att_method == 'v3':
+            # Takes all reps in tangent space as input and outputs weights
+            self.midpoint_weighting = nn.Sequential(nn.Linear(self.n_man*embed_dim, int(4*self.n_man)),
+                                                    nn.ReLU(),
+                                                    nn.Linear(int(4*self.n_man), self.n_man),
+                                                    nn.Softmax(dim = -1))
+                                                    
         
         for man in manifolds:
-            self.res_agg.append(Mob_Res_Midpoint(man))
-            self.fc1.append(nn.Sequential(Manifold_Linear(embed_dim, self.ffn_dim,ball = man, weight_init_ratio = weight_init_ratio), Mob_Act(nn.ReLU(), man)))
+            if self.base_activations == 'act' or man.name == 'Euclidean':
+                act = nn.ReLU()
+            elif self.base_activations == 'mob_act':
+                act = Mob_Act(nn.ReLU(), man)
+            elif self.base_activations == 'None':
+                act = None
             
-            self.fc2.append(nn.Sequential(Manifold_Linear(self.ffn_dim, embed_dim,ball = man, weight_init_ratio = weight_init_ratio), Mob_Act(nn.ReLU(), man)))
+            self.res_agg.append(Mob_Res_Midpoint(man))
+            
+            if act is not None:
+                self.fc1.append(nn.Sequential(Manifold_Linear(embed_dim, self.ffn_dim,ball = man, weight_init_ratio = weight_init_ratio), act))
+                self.fc2.append(nn.Sequential(Manifold_Linear(self.ffn_dim, embed_dim,ball = man, weight_init_ratio = weight_init_ratio), act))
+            else:
+                self.fc1.append(nn.Sequential(Manifold_Linear(embed_dim, self.ffn_dim,ball = man, weight_init_ratio = weight_init_ratio)
+                                              ))
+                self.fc2.append(nn.Sequential(Manifold_Linear(self.ffn_dim, embed_dim,ball = man, weight_init_ratio = weight_init_ratio)))
             
             self.attn.append(ManifoldMHA(embed_dim,num_heads,dropout=attn_dropout, ball = man, weight_init_ratio = weight_init_ratio,att_metric = att_metric))
             
@@ -437,9 +478,10 @@ class PMBlock(nn.Module):
                     self.theta_man_att.append(nn.Linear(self.man_att_dim, 1))
                 elif inter_man_att_method == 'v2':
                     self.w_man_att.append(Manifold_Linear(embed_dim, embed_dim ,ball = man))
-                
-                
-                
+                elif inter_man_att_method == 'v3':
+                    self.w_man_att.append(Manifold_Linear(embed_dim, embed_dim ,ball = man))
+                                              
+            
                 
             if man.name == 'Euclidean':
                 self.pre_attn_norm.append(nn.LayerNorm(embed_dim))
@@ -480,7 +522,7 @@ class PMBlock(nn.Module):
                 u = man.projx(u)
                 if man.name == 'Euclidean':
                     u = self.pre_attn_norm[i](u)
-                else:
+                elif not self.remove_pm_norm_layers:
                     u = man.expmap0(self.pre_attn_norm[i](man.logmap0(u)))
                     
                 x = self.attn[i](x_cls, u, u, key_padding_mask=padding_mask_cur)[0]  # (1, batch, embed_dim)
@@ -489,7 +531,7 @@ class PMBlock(nn.Module):
                 residual = x
                 if man.name == 'Euclidean':
                     x = self.pre_attn_norm[i](x)
-                else:
+                elif not self.remove_pm_norm_layers:
                     x = man.expmap0(self.pre_attn_norm[i](man.logmap0(x)))
                 
                 x = self.attn[i](x, x, x, key_padding_mask=padding_mask,
@@ -498,6 +540,8 @@ class PMBlock(nn.Module):
             
             if man.name == 'Euclidean':
                 x = x + residual
+            elif self.base_resid_agg:
+                x = man.mobius_add(x,residual)
             else:
                 x = self.res_agg[i](x,residual)
             
@@ -506,10 +550,9 @@ class PMBlock(nn.Module):
             residual = x
             if man.name == 'Euclidean':
                 x = self.pre_fc_norm[i](x)
-            elif 'Poincare' in man.name:
-                x = man.expmap0(self.pre_attn_norm[i](man.logmap0(x)))
-            else:
+            elif not self.remove_pm_norm_layers:
                 x = man.expmap0(self.pre_fc_norm[i](man.logmap0(x)))
+                
             x = man.projx(x)
             x = self.fc1[i](x)
             x = self.act_dropout(x)
@@ -517,12 +560,15 @@ class PMBlock(nn.Module):
                 
             if man.name == 'Euclidean':
                 x = x + residual
+            elif self.base_resid_agg:
+                x = man.mobius_add(x,residual)
             else:
                 x = self.res_agg[i](x,residual)
             x = man.projx(x)
             output.append(x)
         
         if self.man_att and self.n_man > 1:
+            # Sun et al. https://arxiv.org/pdf/2112.05393
             if self.inter_man_att_method =='v1': 
                 tan_output = [self.manifolds[i].logmap0(self.w_man_att[i](output[i])) for i in range(self.n_man)]
                 mu = torch.stack(tan_output)
@@ -532,7 +578,8 @@ class PMBlock(nn.Module):
                 proc_jets = []
                 for i in range(self.n_man):
                     proc_jets.append(self.manifolds[i].mobius_scalar_mul(w_i[i], output[i]))
-
+            
+            # Novel midpoint method
             elif self.inter_man_att_method =='v2':
                 tan_output = [self.manifolds[i].logmap0(output[i]) for i in range(self.n_man)]
                 mu = torch.stack(tan_output)
@@ -551,6 +598,51 @@ class PMBlock(nn.Module):
                 proc_jets = []
                 for i in range(self.n_man):
                     proc_jets.append(two_point_mid(output[i],proj_mu[i], self.manifolds[i],torch.ones(d_i[i].shape).to(d_i[i].device).unsqueeze(-1), d_i[i].unsqueeze(-1)))
+            
+            # Novel weighted midpoint method
+            elif self.inter_man_att_method =='v3':
+                
+                tan_output = [self.manifolds[i].logmap0(output[i]) for i in range(self.n_man)]
+                
+                mu_stacked = torch.stack(tan_output)
+                
+                # Learnable weights between manifolds
+                weights = self.midpoint_weighting(mu_stacked.reshape(1, mu_stacked.shape[1], mu_stacked.shape[2], mu_stacked.shape[-1] * mu_stacked.shape[0]))
+                
+                # Outputs normalized weights
+                
+                _, _, dim_2, dim_3 = mu_stacked.shape
+
+                # Update the weights permutation and expansion dynamically
+                weights = weights.permute(3, 1, 2, 0)
+
+                # Dynamically expand based on the shapes of the vector
+                weights = weights.expand(-1, -1, dim_2, dim_3)
+                
+                # Weighted midpoint
+                mu = torch.sum(weights * mu_stacked, dim=0, keepdim=True) # Weights normalized, no denom needed / torch.sum(weights, dim=0, keepdim=True)
+                mu = mu.squeeze(0)
+                
+                # Project midpoints and process 
+                proj_mu = [self.w_man_att[i](self.manifolds[i].expmap0(mu)) for i in range(self.n_man)]
+                                
+                
+                # distance between x_i and mu projected onto M_i
+                d_i = []
+                for i in range(self.n_man):
+                    if self.manifolds[i].name =='Euclidean':
+                        d_i.append(torch.norm(output[i]-proj_mu[i],dim=-1))
+                    else:
+                        d_i.append(self.manifolds[i].dist(output[i],proj_mu[i]))
+                
+                d_i_tensor = torch.stack(d_i, dim=0)  # Shape: (self.n_man, ...)
+                
+                # Apply softmax over the manifold dimension (dim=0)
+                softmax_d_i = torch.softmax(d_i_tensor, dim=0)
+
+                proc_jets = []
+                for i in range(self.n_man):
+                    proc_jets.append(two_point_mid(output[i],proj_mu[i], self.manifolds[i],torch.ones(softmax_d_i[i].shape).to(softmax_d_i[i].device).unsqueeze(-1), softmax_d_i[i].unsqueeze(-1)))
                     
             output =  proc_jets
         return output
@@ -584,10 +676,13 @@ class PMTransformer(nn.Module):
                  for_inference=False,
                  use_amp=False,
                  PM_weight_initialization_factor = 1, 
-                 att_metric = 'dist', 
-                 inter_man_att_method = 'v1',
+                 att_metric = 'tanspace', 
+                 inter_man_att_method = 'v3',
                  inter_man_att = -1,
-                 equal_heads = False, 
+                 equal_heads = False,
+                 base_resid_agg= False,
+                 base_activations = 'act',
+                 remove_pm_norm_layers=False,
                  **kwargs) -> None:
         super().__init__(**kwargs)
         self.part_manifolds = nn.ModuleList()
@@ -602,9 +697,9 @@ class PMTransformer(nn.Module):
             if m == 'R':
                 self.part_manifolds.append(geoopt.Euclidean())
             elif m == 'H':
-                self.part_manifolds.append(geoopt.PoincareBall(c=1.2, learnable=True))
+                self.part_manifolds.append(geoopt.PoincareBallExact(c=1.2, learnable=True))
             elif m == 'S':
-                self.part_manifolds.append(geoopt.SphereProjection(k=1, learnable=True))
+                self.part_manifolds.append(geoopt.SphereProjectionExact(k=1, learnable=True))
         jets = jet_geom.split('x') if 'x' in jet_geom else [jet_geom]
         
         
@@ -612,9 +707,9 @@ class PMTransformer(nn.Module):
             if m == 'R':
                 self.jet_manifolds.append(geoopt.Euclidean())
             elif m == 'H':
-                self.jet_manifolds.append(geoopt.PoincareBall(c=1.2, learnable=True))
+                self.jet_manifolds.append(geoopt.PoincareBallExact(c=1.2, learnable=True))
             elif m == 'S':
-                self.jet_manifolds.append(geoopt.SphereProjection(k=1.0, learnable=True))
+                self.jet_manifolds.append(geoopt.SphereProjectionExact(k=1.0, learnable=True))
 
         self.n_part_man = len(self.part_manifolds)
         self.n_jet_man = len(self.jet_manifolds)
@@ -624,18 +719,37 @@ class PMTransformer(nn.Module):
         self.trimmer = SequenceTrimmer(enabled=trim and not for_inference)
         self.for_inference = for_inference
         self.use_amp = use_amp
+        
+        self.base_resid_agg = base_resid_agg
+        self.base_activations = base_activations
+        self.remove_pm_norm_layers = remove_pm_norm_layers
 
         embed_dim = part_dim
     
         if equal_heads and self.n_part_man > 1: 
             num_heads = int(num_heads/self.n_part_man)
-        default_cfg = dict(embed_dim=embed_dim, num_heads=num_heads, ffn_ratio=1,
-                           dropout=0.1, attn_dropout=0.1, activation_dropout=0.1,
-                           add_bias_kv=False, activation=activation,
-                           scale_fc=True, scale_attn=True, scale_heads=False, scale_resids=True, weight_init_ratio = PM_weight_initialization_factor,att_metric =att_metric,
-                           manifolds = self.part_manifolds,man_att = False,
-                          inter_man_att_method = inter_man_att_method)
-
+            
+        default_cfg = dict(embed_dim=embed_dim, 
+                           num_heads=num_heads, 
+                           ffn_ratio=1,
+                           dropout=0.1, 
+                           attn_dropout=0.1, 
+                           activation_dropout=0.1,
+                           add_bias_kv=False, 
+                           activation=activation,
+                           scale_fc=True, 
+                           scale_attn=True, 
+                           scale_heads=False, 
+                           scale_resids=True, 
+                           weight_init_ratio = PM_weight_initialization_factor,
+                           att_metric =att_metric,
+                           manifolds = self.part_manifolds,
+                           man_att = False,
+                           inter_man_att_method = inter_man_att_method,
+                           base_resid_agg = base_resid_agg,
+                           base_activations = base_activations,
+                           remove_pm_norm_layers = remove_pm_norm_layers)
+        
         cfg_block = copy.deepcopy(default_cfg)
         
         if block_params is not None:
@@ -658,10 +772,19 @@ class PMTransformer(nn.Module):
         self.part_embedding = nn.ModuleList()
         for man in self.part_manifolds:
             self.part_embedding.append(nn.Sequential(Manifold_Linear(input_dim, part_dim, ball = man,weight_init_ratio = PM_weight_initialization_factor)))
-            
         self.blocks = nn.ModuleList()
         for i in range(num_layers):
-            cfg_block['man_att'] = (inter_man_att >= 0 and i != 0 and i % inter_man_att == 0)
+            # if inter_man_att is greater than 0, set man_att based on layers
+            if inter_man_att > 0:
+                cfg_block['man_att'] = (i != 0 and i % inter_man_att == 0)
+            # if inter_man_att is 0, apply man_att to all hidden layers (i.e., layers except the first and last)
+            elif inter_man_att == 0:
+                cfg_block['man_att'] = (i in range(1, num_layers - 1))
+            # if inter_man_att is negative, man_att is False for all layers
+            else: 
+                cfg_block['man_att'] = False
+
+
             self.blocks.append(PMBlock(**cfg_block))
             
         self.cls_blocks = nn.ModuleList([PMBlock(**cfg_cls_block) for _ in range(num_cls_layers)])
@@ -670,20 +793,39 @@ class PMTransformer(nn.Module):
         if fc_params is not None:
             self.jet_fc = nn.ModuleList()
             self.jet_man_fc  = nn.ModuleList()
-#             if self.n_jet_man > 1:
-#                 self.w_man_att_jet = nn.ModuleList()
-#                 self.theta_man_att_jet = nn.ModuleList()
+            if self.n_jet_man > 1:
+                self.midpoint_weighting = nn.Sequential(nn.Linear(self.n_jet_man*jet_dim, int(4*self.n_jet_man)),
+                                                            nn.ReLU(),
+                                                            nn.Linear(int(4*self.n_jet_man), self.n_jet_man),
+                                                            nn.Softmax(dim = -1))
+                self.w_man_att_jet = nn.ModuleList()
             for man in self.jet_manifolds:
+                if self.base_activations == 'act' or man.name == 'Euclidean':
+                    act = nn.ReLU()
+                elif self.base_activations == 'mob_act':
+                    act = Mob_Act(nn.ReLU(), man)
+                elif self.base_activations == 'None':
+                    act = None
                 fcs = []
                 in_dim = total_part_dim
                 self.jet_fc.append(nn.Sequential(nn.Linear(in_dim, in_dim + int(dim_dif*0.5)), nn.ReLU(),
                                                  nn.Linear(in_dim + int(dim_dif*0.5), in_dim + int(dim_dif*0.75)), nn.ReLU(),
                                                  nn.Linear(in_dim + int(dim_dif*0.75), jet_dim), nn.ReLU()))
-                self.jet_man_fc.append(nn.Sequential(Manifold_Linear(jet_dim, jet_dim, ball = man,weight_init_ratio = PM_weight_initialization_factor), Mob_Act(nn.ReLU(), man),
-                                                 Manifold_Linear(jet_dim, jet_dim, ball = man,weight_init_ratio = PM_weight_initialization_factor)))
-#                 if self.n_jet_man > 1:
-#                     self.w_man_att_jet.append(Manifold_Linear(out_dim, out_dim ,ball = man))
-#                     self.theta_man_att_jet.append(nn.Linear(out_dim, 1))
+                
+                if act is not None :
+                    self.jet_man_fc.append(nn.Sequential(
+                        Manifold_Linear(jet_dim, jet_dim, ball=man, weight_init_ratio=PM_weight_initialization_factor), 
+                        act,
+                        Manifold_Linear(jet_dim, jet_dim, ball=man, weight_init_ratio=PM_weight_initialization_factor)
+                    ))
+                else:
+                    self.jet_man_fc.append(nn.Sequential(
+                        Manifold_Linear(jet_dim, jet_dim, ball=man, weight_init_ratio=PM_weight_initialization_factor),
+                        Manifold_Linear(jet_dim, jet_dim, ball=man, weight_init_ratio=PM_weight_initialization_factor)
+                    ))
+                if self.n_jet_man > 1:
+                    self.w_man_att_jet.append(Manifold_Linear(jet_dim, jet_dim ,ball = man))
+                
             post_jet_dim = self.n_jet_man * jet_dim
             self.final_fc = nn.Sequential(nn.Linear(post_jet_dim, post_jet_dim), nn.ReLU(),
                                           nn.Linear(post_jet_dim, post_jet_dim), nn.ReLU(),
@@ -777,23 +919,52 @@ class PMTransformer(nn.Module):
             
             x_jets = [self.jet_man_fc[i](x_jets[i]) for i in range(self.n_jet_man)]
             
-            
-#             if self.n_jet_man > 1:
-#                 #Inspired arXiv:2112.05393v1 inspired operations
-#                 proc_log = [self.jet_manifolds[i].logmap0(self.w_man_att_jet[i](x_jets[i])) for i in range(self.n_jet_man)]
-#                 mu = torch.stack(proc_log)
-#                 mu = torch.mean(mu, dim=0)
-#                 inter_att = [self.theta_man_att_jet[i](proc_log[i]-mu) for i in range(self.n_jet_man)]
+            if self.n_jet_man > 1:
+                
+                
+                tan_output = [self.jet_manifolds[i].logmap0(x_jets[i]) for i in range(self.n_jet_man)]
+                
+                mu_stacked = torch.stack(tan_output)
+                print(mu_stacked.shape)
+                
+                # Learnable weights between manifolds
+                weights = self.midpoint_weighting(mu_stacked.reshape(1, mu_stacked.shape[1], mu_stacked.shape[2], mu_stacked.shape[-1] * mu_stacked.shape[0]))
+                
+                _, _, dim_2, dim_3 = mu_stacked.shape
 
-#                 w_i = nn.Softmax(dim=0)(torch.stack(inter_att,dim =0))
-#                 proc_jets = []
-#                 for i in range(self.n_jet_man):
-#                     if self.jet_manifolds[i].name == 'Euclidean':
-#                         proc_jets.append(w_i[i]*x_jets[i])
-#                     else:
-#                         proc_jets.append(self.jet_manifolds[i].mobius_scalar_mul(w_i[i], x_jets[i]))
-#             else:
-            proc_jets = x_jets
+                # Update the weights permutation and expansion dynamically
+                weights = weights.permute(3, 1, 2, 0)
+
+                # Dynamically expand based on the shapes of the vector
+                weights = weights.expand(-1, -1, dim_2, dim_3)
+                
+                # Weighted midpoint
+                mu = torch.sum(weights * mu_stacked, dim=0, keepdim=True) # Weights normalized, no denom needed / torch.sum(weights, dim=0, keepdim=True)
+                mu = mu.squeeze(0)
+                
+                # Project midpoints and process 
+                proj_mu = [self.w_man_att_jet[i](self.jet_manifolds[i].expmap0(mu)) for i in range(self.n_jet_man)]
+                                
+                
+                # distance between x_i and mu projected onto M_i
+                d_i = []
+                for i in range(self.n_jet_man):
+                    if self.jet_manifolds[i].name =='Euclidean':
+                        d_i.append(torch.norm(x_jets[i]-proj_mu[i],dim=-1))
+                    else:
+                        d_i.append(self.jet_manifolds[i].dist(x_jets[i],proj_mu[i]))
+                
+                d_i_tensor = torch.stack(d_i, dim=0)  # Shape: (self.n_jet_man, ...)
+                
+                # Apply softmax over the manifold dimension (dim=0)
+                softmax_d_i = torch.softmax(d_i_tensor, dim=0)
+
+                proc_jets = []
+                for i in range(self.n_jet_man):
+                    proc_jets.append(two_point_mid(x_jets[i],proj_mu[i], self.jet_manifolds[i],torch.ones(softmax_d_i[i].shape).to(softmax_d_i[i].device).unsqueeze(-1), softmax_d_i[i].unsqueeze(-1)))
+                
+            else:       
+                proc_jets = x_jets
             
             x_jets_tan = [man.logmap0(proc_jets[i]) for i,man in enumerate(self.jet_manifolds)]
             if embed:

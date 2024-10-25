@@ -164,8 +164,17 @@ parser.add_argument('--att-metric',  type=str, default='dist',choices=['dist', '
                     help='Type of attention weight calculation for PM models: distance based or Euclidean attention in the T_0 M')
 parser.add_argument('--inter-man-att',  type=int, default=-1,
                     help='Determines how often inter-manifold attention is applied. For input n, applies inter-manifold after every n^th PM block')
-parser.add_argument('--inter-man-att-method',  type=str, default='dist',choices=['v1', 'v2'],
+parser.add_argument('--inter-man-att-method',  type=str, default='dist',choices=['v1', 'v2','v3'],
                     help='Determines which method of inter_manifold attention to use either v1 or v2')
+
+parser.add_argument('--base-resid-agg', action='store_true', default=False,
+                    help='applys the base residual aggregation method. Defaults to custom for PM models')
+parser.add_argument('--base-activations', type=str, default='act', choices=['act', 'mob_act', 'none'],
+                    help='Applies the base activations. Defaults to custom for PM models')
+parser.add_argument('--remove-pm-norm-layers', action='store_true', default=False,
+                    help='removes PM normalization layers. Defaults to custom for PM models')
+
+
 
 
 
@@ -606,7 +615,7 @@ def model_setup(args, data_config, device='cpu'):
     
 
     
-    filtered_args_dict = {k: args_dict[k] for k in ['part_geom', 'part_dim', 'jet_geom', 'jet_dim','equal_heads','PM_weight_initialization_factor','att_metric','inter_man_att','inter_man_att_method'] if k in args_dict}
+    filtered_args_dict = {k: args_dict[k] for k in ['part_geom', 'part_dim', 'jet_geom', 'jet_dim','equal_heads','PM_weight_initialization_factor','att_metric','inter_man_att','inter_man_att_method','base_resid_agg','base_activations','remove_pm_norm_layers'] if k in args_dict}
 
     # Merge dictionaries
     combined_options = {**network_options, **filtered_args_dict}
@@ -939,8 +948,14 @@ def _main(args):
         
         
         output_metric_dir = args.data_config.split('/')[1]+f'_performance_summary_{args.dev_id}'
-        if not os.path.exists(output_metric_dir):
-            os.makedirs(output_metric_dir,exists_ok = True)
+        try:
+            os.makedirs(output_metric_dir)
+        except OSError:
+            if not os.path.isdir(output_metric_dir):
+                raise
+
+#         if not os.path.exists(output_metric_dir):
+#             os.makedirs(output_metric_dir,exists_ok = True)
         output_file_name = args.tensorboard
         if args.embedding_mode:
             output_file_path = os.path.join(output_metric_dir, f"{output_file_name}_embedding_performance.csv")

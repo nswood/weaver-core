@@ -192,9 +192,9 @@ class ManifoldMHA(nn.Module):
 
         else:
             key_layer_transposed = key_layer.transpose(-1, -2)
-            Euclidean_attention_scores = torch.matmul(query_layer, key_layer_transposed)
-            scalings = self.ball.lambda_x(query_layer).unsqueeze(-1)**2
-            attention_scores = Euclidean_attention_scores*scalings
+#             Euclidean_attention_scores = torch.matmul(query_layer, key_layer_transposed)
+#             scalings = self.ball.lambda_x(query_layer).unsqueeze(-1)**2
+#             attention_scores = Euclidean_attention_scores*scalings
             # distance based attention 
             if self.att_metric == 'dist':
                 t1 = self.ball.mobius_add(-query_layer.unsqueeze(-2), key_layer.unsqueeze(-2).transpose(2, 3)).norm(dim=-1, p=2)
