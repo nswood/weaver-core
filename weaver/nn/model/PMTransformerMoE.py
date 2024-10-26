@@ -461,6 +461,7 @@ class PMBlock(nn.Module):
                  inter_man_att_method='v2',
                  base_resid_agg=False,
                  base_activations='act',
+                 topk =1
                  remove_pm_norm_layers=False):
         super().__init__()
         
@@ -486,7 +487,6 @@ class PMBlock(nn.Module):
         # Initialize lists to hold modules for each manifold
         self.pre_attn_norm = nn.ModuleList()
         self.pre_fc_norm = nn.ModuleList()
-        self.res_agg = nn.ModuleList()
         self.fc1 = nn.ModuleList()
         self.fc2 = nn.ModuleList()
         self.attn = nn.ModuleList()
@@ -498,9 +498,10 @@ class PMBlock(nn.Module):
             if inter_man_att_method == 'v3':
                 # Initialize midpoint_weighting with n_experts
                 self.midpoint_weighting = nn.Sequential(
-                    nn.Linear(self.n_experts * embed_dim, int(4 * self.n_experts)), 
+                    nn.Linear(self.n_experts * embed_dim+ n_experts *n_experts, int(4 * self.n_experts)), 
                     nn.ReLU(),
-                    nn.Linear(int(4 * self.n_experts), self.n_experts)
+                    nn.Linear(int(4 * self.n_experts), self.n_experts),
+                    nn.Softmax(dim = -1)
                 )
         
         for man in manifolds:
@@ -511,9 +512,6 @@ class PMBlock(nn.Module):
                 act = Mob_Act(nn.ReLU(), man)
             elif self.base_activations == 'None':
                 act = None
-            
-            # Residual aggregation per manifold
-            self.res_agg.append(Mob_Res_Midpoint(man))
             
             # Feedforward layers per manifold
             if act is not None:
@@ -550,7 +548,9 @@ class PMBlock(nn.Module):
             self.pre_attn_norm.append(nn.LayerNorm(embed_dim))
             self.pre_fc_norm.append(nn.LayerNorm(embed_dim))
 
-    def forward(self, pm_x, pm_x_cls=None, padding_mask=None, attn_mask=None, selected_indices=None):
+#     def forward(self, pm_x, pm_x_cls=None, padding_mask=None, attn_mask=None, selected_indices=None):
+    def forward(self, pm_x, pm_x_cls=None, padding_mask=None, attn_mask=None, selected_indices=None, expert_one_hot=None):
+
         """
         Args:
             pm_x (List[Tensor]): list of input tensors, one per manifold, each of shape `(seq_len, batch, embed_dim)`
@@ -601,10 +601,8 @@ class PMBlock(nn.Module):
             # Residual connection
             if man.name == 'Euclidean':
                 x = x + residual
-            elif self.base_resid_agg:
-                x = man.mobius_add(x, residual)
             else:
-                x = self.res_agg[idx](x, residual)
+                x = man.mobius_add(x, residual)
             
             residual = x
             if man.name == 'Euclidean':
@@ -620,10 +618,8 @@ class PMBlock(nn.Module):
             # Residual connection
             if man.name == 'Euclidean':
                 x = x + residual
-            elif self.base_resid_agg:
-                x = man.mobius_add(x, residual)
             else:
-                x = self.res_agg[idx](x, residual)
+                x = man.mobius_add(x, residual)
             x = man.projx(x)
             output[idx] = x
         
@@ -639,10 +635,18 @@ class PMBlock(nn.Module):
                 # Reshape for midpoint_weighting
                 mu_stacked = mu_stacked.permute(2, 1, 0, 3)  # (batch_size, seq_len, n_experts, embed_dim)
                 mu_flat = mu_stacked.reshape(mu_stacked.shape[0], mu_stacked.shape[1], -1)  # (batch_size, seq_len, n_experts * embed_dim)
+                
+                # Concatenate `expert_one_hot` to `mu_flat` before passing through `midpoint_weighting`
+            if expert_one_hot is not None:
+                # Repeat expert_one_hot to match the batch and seq_len dimensions of mu_flat
+                expert_one_hot_repeated = expert_one_hot.unsqueeze(0).unsqueeze(0).repeat(mu_flat.shape[0], mu_flat.shape[1], 1)
+                mu_flat = torch.cat([mu_flat, expert_one_hot_repeated], dim=-1)  # Concatenate on last dimension
+
+                
                 # Pass through midpoint_weighting
                 weights = self.midpoint_weighting(mu_flat)  # (batch_size, seq_len, n_experts)
-                weights = F.softmax(weights, dim=-1)  # Softmax over n_experts
                 weights = weights.unsqueeze(-1)  # (batch_size, seq_len, n_experts, 1)
+                
                 # Compute weighted sum
                 mu = (weights * mu_stacked).sum(dim=2)  # (batch_size, seq_len, embed_dim)
                 mu = mu.permute(1, 0, 2)  # (seq_len, batch_size, embed_dim)
@@ -766,7 +770,8 @@ class PMTransformer(nn.Module):
             base_resid_agg=base_resid_agg,
             base_activations=base_activations,
             remove_pm_norm_layers=remove_pm_norm_layers,
-            n_experts=self.n_experts  # Pass n_experts to PMBlock
+            n_experts=self.n_experts,  # Pass n_experts to PMBlock
+            topk = topk
         )
         
         cfg_block = copy.deepcopy(default_cfg)
@@ -913,6 +918,9 @@ class PMTransformer(nn.Module):
             # Prepare inputs for selected experts
             pm_x = [None] * self.n_man
             pm_x_cls = [None] * self.n_man
+            expert_one_hot = F.one_hot(torch.tensor(selected_indices), num_classes=self.n_experts).float()
+
+            
             for idx in selected_indices:
                 man = self.part_manifolds[idx]
                 cls_tokens = self.cls_token[idx].expand(1, x.size(1), -1)
@@ -922,7 +930,7 @@ class PMTransformer(nn.Module):
 
             # Pass through blocks
             for block in self.blocks:
-                pm_x = block(pm_x, pm_x_cls=None, padding_mask=padding_mask, attn_mask=attn_mask, selected_indices=selected_indices)
+                pm_x = block(pm_x, pm_x_cls=None, padding_mask=padding_mask, attn_mask=attn_mask, selected_indices=selected_indices,expert_one_hot=expert_one_hot)
 
             # Pass through class blocks
             for block in self.cls_blocks:
@@ -967,6 +975,14 @@ class PMTransformer(nn.Module):
 
                 # Reshape for midpoint_weighting
                 mu_flat = tan_output_stacked.permute(1, 0, 2).reshape(batch_size, -1)  # (batch_size, num_selected_experts * jet_dim)
+                
+                
+                # Generate hot-encoded vector for each expert in `jet_selected_indices`
+                jet_expert_one_hot = F.one_hot(torch.tensor(jet_selected_indices), num_classes=self.jet_num_experts).float()
+                jet_expert_one_hot_repeated = jet_expert_one_hot.unsqueeze(0).expand(batch_size, -1, -1).reshape(batch_size, -1)
+
+                # Concatenate `jet_expert_one_hot_repeated` with `mu_flat`
+                mu_flat = torch.cat([mu_flat, jet_expert_one_hot_repeated], dim=-1)
 
                 # Pass through midpoint_weighting
                 weights = self.jet_midpoint_weighting(mu_flat)  # (batch_size, num_selected_experts)
