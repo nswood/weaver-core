@@ -53,7 +53,7 @@ def _flatten_preds(model_output, label=None, mask=None, label_axis=1):
 
 def train_classification(
         model, loss_func, opt, scheduler, train_loader, dev, epoch, steps_per_epoch=None, grad_scaler=None,
-        tb_helper=None):
+        tb_helper=None,args = None):
     model.train()
 
     data_config = train_loader.dataset.config
@@ -66,7 +66,7 @@ def train_classification(
     count = 0
     start_time = time.time()
     with tqdm.tqdm(train_loader) as tq:
-        for X, y, _ in tq:
+        for batch_idx, (X, y, _) in enumerate(tq):
             inputs = [X[k].to(dev) for k in data_config.input_names]
             label = y[data_config.label_names[0]].long().to(dev)
             entry_count += label.shape[0]
@@ -74,14 +74,18 @@ def train_classification(
                 mask = y[data_config.label_names[0] + '_mask'].bool().to(dev)
             except KeyError:
                 mask = None
-            opt.zero_grad()
+#             opt.zero_grad()
             with torch.cuda.amp.autocast(enabled=grad_scaler is not None):
                 model_output = model(*inputs)
                 logits, label, _ = _flatten_preds(model_output, label=label, mask=mask)
                 loss = loss_func(logits, label)
             if grad_scaler is None:
                 loss.backward()
-                opt.step()
+                if batch_idx % args.grad_accum == 0:
+#                     print(batch_idx)
+                    opt.step()
+                    opt.zero_grad()
+#                 opt.step()
             else:
                 grad_scaler.scale(loss).backward()
                 grad_scaler.step(opt)
@@ -125,6 +129,22 @@ def train_classification(
     _logger.info('Processed %d entries in total (avg. speed %.1f entries/s)' % (entry_count, entry_count / time_diff))
     _logger.info('Train AvgLoss: %.5f, AvgAcc: %.5f' % (total_loss / num_batches, total_correct / count))
     _logger.info('Train class distribution: \n    %s', str(sorted(label_counter.items())))
+    
+    lock_path = args.output_file_path + ".lock"
+    lock = FileLock(lock_path)
+
+    # Use the lock to ensure safe read/write operations
+    with lock:
+        if os.path.exists(args.output_file_path):
+            df = pd.read_csv(args.output_file_path)
+        else:
+            df = pd.DataFrame(columns=["epoch", "train_acc", "train_loss","val_acc", "val_loss"])
+
+        
+        new_data = {"epoch": epoch, "train_acc": total_correct / count, "train_loss": total_loss / count}
+
+        df = df.append(new_data, ignore_index=True)
+        df.to_csv(args.output_file_path, index=False)
 
     if tb_helper:
         tb_helper.write_scalars([
@@ -239,15 +259,12 @@ def evaluate_classification(model, test_loader, dev, epoch, for_training=True, l
 
     # Use the lock to ensure safe read/write operations
     with lock:
-        if os.path.exists(args.output_file_path):
-            df = pd.read_csv(args.output_file_path)
-        else:
-            df = pd.DataFrame(columns=["epoch", "acc", "loss", "auc"])
+        df = pd.read_csv(args.output_file_path)
 
         if epoch is None:
             new_data = {"test_acc": total_correct / count, "test_loss": total_loss / count, "test_auc": metric_results['roc_auc_score']}
         else:
-            new_data = {"epoch": epoch, "acc": total_correct / count, "loss": total_loss / count, "auc": metric_results['roc_auc_score']}
+            new_data = {"epoch": epoch, "val_acc": total_correct / count, "val_loss": total_loss / count}
 
         df = df.append(new_data, ignore_index=True)
         df.to_csv(args.output_file_path, index=False)
@@ -288,7 +305,7 @@ def train_embedding(
     entry_count = 0
     start_time = time.time()
     with tqdm.tqdm(train_loader) as tq:
-        for X, y, _ in tq:
+        for batch_idx, (X, y, _) in enumerate(tq):
             inputs = [X[k].to(dev) for k in data_config.input_names]
             label = y[data_config.label_names[0]].long().to(dev)
             entry_count += label.shape[0]
@@ -301,6 +318,8 @@ def train_embedding(
                 embedding, tan_embedding,manifolds = model(*inputs,embed = True)
                 label = torch.tensor(label)
                 loss = loss_func(embedding, tan_embedding, label,manifolds)
+                
+            
             if grad_scaler is None:
                 loss.backward()
                 opt.step()

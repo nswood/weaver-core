@@ -406,8 +406,8 @@ class PMBlock(nn.Module):
                  scale_resids=True,
                  man_att = False,
                  weight_init_ratio =1,
-                 att_metric = 'dist',
-                 inter_man_att_method = 'v2',
+                 att_metric = 'tan_space',
+                 inter_man_att_method = 'v3',
                  base_resid_agg= False,
                  base_activations = 'act',
                  remove_pm_norm_layers=False):
@@ -519,7 +519,6 @@ class PMBlock(nn.Module):
                 # class attention: https://arxiv.org/pdf/2103.17239.pdf
                 residual = x_cls
                 u = torch.cat((x_cls, x), dim=0)  # (seq_len+1, batch, embed_dim)
-                u = man.projx(u)
                 if man.name == 'Euclidean':
                     u = self.pre_attn_norm[i](u)
                 elif not self.remove_pm_norm_layers:
@@ -545,7 +544,7 @@ class PMBlock(nn.Module):
             else:
                 x = self.res_agg[i](x,residual)
             
-            
+            x = man.projx(x)
             
             residual = x
             if man.name == 'Euclidean':
@@ -556,6 +555,7 @@ class PMBlock(nn.Module):
             x = man.projx(x)
             x = self.fc1[i](x)
             x = self.act_dropout(x)
+            x = man.projx(x)
             x = self.fc2[i](x)
                 
             if man.name == 'Euclidean':
@@ -642,8 +642,10 @@ class PMBlock(nn.Module):
 
                 proc_jets = []
                 for i in range(self.n_man):
-                    proc_jets.append(two_point_mid(output[i],proj_mu[i], self.manifolds[i],torch.ones(softmax_d_i[i].shape).to(softmax_d_i[i].device).unsqueeze(-1), softmax_d_i[i].unsqueeze(-1)))
-                    
+                    agg_jets = two_point_mid(output[i],proj_mu[i], self.manifolds[i],torch.ones(softmax_d_i[i].shape).to(softmax_d_i[i].device).unsqueeze(-1), softmax_d_i[i].unsqueeze(-1))
+                    agg_jets = self.manifolds[i].projx(agg_jets)
+                    proc_jets.append(agg_jets)
+            
             output =  proc_jets
         return output
 
@@ -683,12 +685,20 @@ class PMTransformer(nn.Module):
                  base_resid_agg= False,
                  base_activations = 'act',
                  remove_pm_norm_layers=False,
+                 dropout_rate = 0.1,
+                 curvature_init = 1.2,
+                 conv_embed = 'False',
+                 clamp = -1,
                  **kwargs) -> None:
         super().__init__(**kwargs)
         self.part_manifolds = nn.ModuleList()
         self.jet_manifolds = nn.ModuleList()
         parts = part_geom.split('x') if 'x' in part_geom else [part_geom]
         jets = jet_geom.split('x') if 'x' in jet_geom else [jet_geom]
+        
+        self.conv_embed = conv_embed  =='True'
+        self.clamp = clamp
+        
         
         embed_dims = [part_dim, part_dim, part_dim] #embed_dims=[128, 512, 128]
         fc_params = [[jet_dim,0.1], [jet_dim,0.1], [jet_dim,0.1]] #fc_params=[],
@@ -697,9 +707,9 @@ class PMTransformer(nn.Module):
             if m == 'R':
                 self.part_manifolds.append(geoopt.Euclidean())
             elif m == 'H':
-                self.part_manifolds.append(geoopt.PoincareBallExact(c=1.2, learnable=True))
+                self.part_manifolds.append(geoopt.PoincareBallExact(c=curvature_init, learnable=True))
             elif m == 'S':
-                self.part_manifolds.append(geoopt.SphereProjectionExact(k=1, learnable=True))
+                self.part_manifolds.append(geoopt.SphereProjectionExact(k=curvature_init, learnable=True))
         jets = jet_geom.split('x') if 'x' in jet_geom else [jet_geom]
         
         
@@ -707,14 +717,17 @@ class PMTransformer(nn.Module):
             if m == 'R':
                 self.jet_manifolds.append(geoopt.Euclidean())
             elif m == 'H':
-                self.jet_manifolds.append(geoopt.PoincareBallExact(c=1.2, learnable=True))
+                self.jet_manifolds.append(geoopt.PoincareBallExact(c=curvature_init, learnable=True))
             elif m == 'S':
-                self.jet_manifolds.append(geoopt.SphereProjectionExact(k=1.0, learnable=True))
+                self.jet_manifolds.append(geoopt.SphereProjectionExact(k=curvature_init, learnable=True))
 
         self.n_part_man = len(self.part_manifolds)
         self.n_jet_man = len(self.jet_manifolds)
         
         total_part_dim = part_dim * self.n_part_man
+        total_jet_dim = jet_dim * self.n_jet_man
+        
+        self.norm = nn.LayerNorm(total_jet_dim)
         
         self.trimmer = SequenceTrimmer(enabled=trim and not for_inference)
         self.for_inference = for_inference
@@ -732,9 +745,9 @@ class PMTransformer(nn.Module):
         default_cfg = dict(embed_dim=embed_dim, 
                            num_heads=num_heads, 
                            ffn_ratio=1,
-                           dropout=0.1, 
-                           attn_dropout=0.1, 
-                           activation_dropout=0.1,
+                           dropout=dropout_rate, 
+                           attn_dropout=dropout_rate, 
+                           activation_dropout=dropout_rate,
                            add_bias_kv=False, 
                            activation=activation,
                            scale_fc=True, 
@@ -864,22 +877,20 @@ class PMTransformer(nn.Module):
         with torch.cuda.amp.autocast(enabled=self.use_amp):
             # input embedding
             # Remove extreme preprocessing
-#             x = self.embed(x).masked_fill(~mask.permute(2, 0, 1), 0)  # (P, N, C)
+            if self.conv_embed:
+                x = self.embed(x).masked_fill(~mask.permute(2, 0, 1), 0)  # (P, N, C)
             x =x.permute(2,0, 1)
             attn_mask = None
             if (v is not None or uu is not None) and self.pair_embed is not None:
                 attn_mask = self.pair_embed(v, uu).view(-1, v.size(-1), v.size(-1))  # (N*num_heads, P, P)
             
-#             if 'Poincare' in man.name:
-#                     # r = 0.6
-#                     x_cur = torch.clamp(0.6/x.norm(dim=1), max = 1)*x
-#                     cls_cur = torch.clamp(0.6/cls_tokens.norm(dim=1), max = 1)*cls_tokens
-#                 else:
             
             x_parts = []
             cls_tokens_parts = []
             for i,man in enumerate(self.part_manifolds):
                 cls_tokens = self.cls_token[i].expand(1, x.size(1), -1)
+                if self.clamp > 1 and 'Poincare' in man.name:
+                    x = torch.clamp(self.clamp/x.norm(dim=1), max = 1)*x
                 x_parts.append(self.part_embedding[i](man.expmap0(x)))
                 cls_tokens_parts.append(cls_tokens)
             # extract class token
@@ -913,6 +924,13 @@ class PMTransformer(nn.Module):
             # Map to correct Jet dim in Euclidean space
             x_jets = [self.jet_fc[i](x_jets[i]) for i in range(self.n_jet_man)]
             
+            # Clamp
+            if self.clamp > 1:
+                for i,man in enumerate(self.jet_manifolds):
+                    if 'Poincare' in man.name:
+                        print('jet clamp')
+                        x_jets[i] = torch.clamp(self.clamp/x_jets[i].norm(dim=1), max = 1)*x_jets[i]
+            
             # Map to Jet Manifold
             x_jets = [man.expmap0(x_jets[i]) for i, man in enumerate(self.jet_manifolds)]
             del x_cls
@@ -921,11 +939,9 @@ class PMTransformer(nn.Module):
             
             if self.n_jet_man > 1:
                 
-                
                 tan_output = [self.jet_manifolds[i].logmap0(x_jets[i]) for i in range(self.n_jet_man)]
                 
                 mu_stacked = torch.stack(tan_output)
-                print(mu_stacked.shape)
                 
                 # Learnable weights between manifolds
                 weights = self.midpoint_weighting(mu_stacked.reshape(1, mu_stacked.shape[1], mu_stacked.shape[2], mu_stacked.shape[-1] * mu_stacked.shape[0]))
@@ -978,6 +994,9 @@ class PMTransformer(nn.Module):
                 x_out = torch.cat(x_jets_tan,dim=-1)
             else:
                 x_out = x_jets_tan[0]
+            
+            # Regular LayerNorm    
+            x_out = self.norm(x_out).squeeze(0)
             
             # Final classification FC
             output = self.final_fc(x_out).squeeze(0)

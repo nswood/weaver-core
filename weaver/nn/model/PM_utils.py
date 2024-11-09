@@ -8,7 +8,7 @@ from typing import List, Optional, Tuple, Union
     
 import numpy as np
 import torch
-# torch.set_default_dtype(torch.float64)
+torch.set_default_dtype(torch.float64)
 
 import torch.nn as nn
 import torch.nn.init as init
@@ -78,7 +78,7 @@ class Manifold_Linear(nn.Module):
     
     def reset_parameters(self):
         if self.ball.name == 'Euclidean':
-            init.kaiming_uniform_(self.weight, a=0.001)
+            init.kaiming_uniform_(self.weight, a=0.001* self.weight_init_ratio)
         else:
             # want to pass in ratio for a 
 #             init.kaiming_uniform_(self.weight, a=0.00001)
@@ -120,7 +120,7 @@ class ManifoldMHA(nn.Module):
         
         self.att_metric = att_metric
         
-        print(att_metric)
+#         print(att_metric)
         
         self.query = Manifold_Linear(hidden_size, hidden_size, ball=self.ball, weight_init_ratio = weight_init_ratio)
         self.key = Manifold_Linear(hidden_size, hidden_size, ball=self.ball, weight_init_ratio = weight_init_ratio)

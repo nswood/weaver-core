@@ -98,7 +98,7 @@ parser.add_argument('--samples-per-epoch', type=int, default=None,
 parser.add_argument('--samples-per-epoch-val', type=int, default=None,
                     help='number of samples per epochs for validation; '
                          'if neither of `--steps-per-epoch-val` or `--samples-per-epoch-val` is set, each epoch will run over all loaded samples')
-parser.add_argument('--optimizer', type=str, default='ranger', choices=['adam', 'adamW', 'radam','r_adam', 'ranger', 'rlion'],  # TODO: add more
+parser.add_argument('--optimizer', type=str, default='ranger', choices=['adam', 'adamW', 'radam','r_adam', 'ranger', 'rlion','riemann_ranger'],  # TODO: add more
                     help='optimizer for the training')
 parser.add_argument('--optimizer-option', nargs=2, action='append', default=[],
                     help='options to pass to the optimizer class constructor, e.g., `--optimizer-option weight_decay 1e-4`')
@@ -107,12 +107,17 @@ parser.add_argument('--lr-scheduler', type=str, default='flat+decay',
                     help='learning rate scheduler')
 parser.add_argument('--warmup-steps', type=int, default=0,
                     help='number of warm-up steps, only valid for `flat+linear` and `flat+cos` lr schedulers')
+parser.add_argument('--decay-steps', type=float, default=0.3,
+                    help='percent of steps for lr decay, only for `flat+decay` lr scheduler')
+
 parser.add_argument('--load-epoch', type=int, default=None,
                     help='used to resume interrupted training, load model and optimizer state saved in the `epoch-%%d_state.pt` and `epoch-%%d_optimizer.pt` files')
 parser.add_argument('--start-lr', type=float, default=5e-3,
                     help='start learning rate')
 parser.add_argument('--batch-size', type=int, default=128,
                     help='batch size')
+parser.add_argument('--grad-accum', type=int, default=1,
+                    help='gradient accumulatation')
 parser.add_argument('--use-amp', action='store_true', default=False,
                     help='use mixed precision training (fp16)')
 parser.add_argument('--gpus', type=str, default='0',
@@ -511,6 +516,9 @@ def optim(args, model, device):
     if args.optimizer == 'ranger':
         from weaver.utils.nn.optimizer.ranger import Ranger
         opt = Ranger(parameters, lr=args.start_lr, **optimizer_options)
+    elif args.optimizer =='riemann_ranger':
+        from weaver.utils.nn.optimizer.riemiann_ranger import Riemiann_ranger
+        opt = Riemiann_ranger(parameters, lr=args.start_lr, **optimizer_options)
     elif args.optimizer == 'rlion':
         from lion_pytorch.Rlion_pytorch import RLion
         opt = RLion(parameters, lr=args.start_lr,**optimizer_options)
@@ -548,8 +556,9 @@ def optim(args, model, device):
                 opt, milestones=[lr_step, 2 * lr_step], gamma=0.1,
                 last_epoch=-1 if args.load_epoch is None else args.load_epoch)
         elif args.lr_scheduler == 'flat+decay':
-#             num_decay_epochs = max(1, int(args.num_epochs * 0.3))
-            num_decay_epochs = max(1, int(args.num_epochs * 0.7))
+            
+            num_decay_epochs = max(1, int(args.num_epochs * args.decay_steps))
+#             num_decay_epochs = max(1, int(args.num_epochs * 0.7))
             
             milestones = list(range(args.num_epochs - num_decay_epochs, args.num_epochs))
             gamma = 0.01 ** (1. / num_decay_epochs)
@@ -974,7 +983,8 @@ def _main(args):
             best_valid_metric = np.inf
         else:
             best_valid_metric = 0
-        
+            
+        last_valid_metric = 0.6
         grad_scaler = torch.cuda.amp.GradScaler() if args.use_amp else None
         for epoch in range(args.num_epochs):
             if args.load_epoch is not None:
@@ -983,15 +993,18 @@ def _main(args):
             _logger.info('-' * 50)
             _logger.info('Epoch #%d training' % epoch)
             train(model, loss_func, opt, scheduler, train_loader, dev, epoch,
-                  steps_per_epoch=args.steps_per_epoch, grad_scaler=grad_scaler, tb_helper=tb)
-            if args.model_prefix and (args.backend is None or local_rank == 0):
-                dirname = os.path.dirname(args.model_prefix)
-                if dirname and not os.path.exists(dirname):
-                    os.makedirs(dirname)
-                state_dict = model.module.state_dict() if isinstance(
-                    model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)) else model.state_dict()
-                torch.save(state_dict, args.model_prefix + '_epoch-%d_state.pt' % epoch)
-                torch.save(opt.state_dict(), args.model_prefix + '_epoch-%d_optimizer.pt' % epoch)
+                  steps_per_epoch=args.steps_per_epoch, grad_scaler=grad_scaler, tb_helper=tb,args = args)
+            
+            # Turn off per epoch saving, only save best
+            if False:
+                if args.model_prefix and (args.backend is None or local_rank == 0):
+                    dirname = os.path.dirname(args.model_prefix)
+                    if dirname and not os.path.exists(dirname):
+                        os.makedirs(dirname)
+                    state_dict = model.module.state_dict() if isinstance(
+                        model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)) else model.state_dict()
+                    torch.save(state_dict, args.model_prefix + '_epoch-%d_state.pt' % epoch)
+                    torch.save(opt.state_dict(), args.model_prefix + '_epoch-%d_optimizer.pt' % epoch)
             # if args.backend is not None and local_rank == 0:
             # TODO: save checkpoint
             #     save_checkpoint()
@@ -1003,81 +1016,85 @@ def _main(args):
                 is_best_epoch = valid_metric < best_valid_metric
             else:
                 is_best_epoch = valid_metric > best_valid_metric
+                if valid_metric < 0.60 and last_valid_metric <0.60:
+                    break
             if is_best_epoch:
                 best_valid_metric = valid_metric
-                if args.model_prefix and (args.backend is None or local_rank == 0):
-                    shutil.copy2(args.model_prefix + '_epoch-%d_state.pt' %
-                                 epoch, args.model_prefix + '_best_epoch_state.pt')
-                    # torch.save(model, args.model_prefix + '_best_epoch_full.pt')
+#                 if args.model_prefix and (args.backend is None or local_rank == 0):
+#                     shutil.copy2(args.model_prefix + '_epoch-%d_state.pt' %
+#                                  epoch, args.model_prefix + '_best_epoch_state.pt')
+#                     # torch.save(model, args.model_prefix + '_best_epoch_full.pt')
             _logger.info('Epoch #%d: Current validation metric: %.5f (best: %.5f)' %
                          (epoch, valid_metric, best_valid_metric), color='bold')
+            last_valid_metric = valid_metric
+    # Skipping over test dataset
+    if False:
+        if args.data_test:
+            if args.backend is not None and local_rank != 0:
+                return
+            if training_mode:
+                del train_loader, val_loader
+                test_loaders, data_config = test_load(args)
 
-    if args.data_test:
-        if args.backend is not None and local_rank != 0:
-            return
-        if training_mode:
-            del train_loader, val_loader
-            test_loaders, data_config = test_load(args)
-
-        if not args.model_prefix.endswith('.onnx'):
-            if args.predict_gpus:
-                gpus = [int(i) for i in args.predict_gpus.split(',')]
-                dev = torch.device(gpus[0])
-            else:
-                gpus = None
-                dev = torch.device('cpu')
-                try:
-                    if torch.backends.mps.is_available():
-                        dev = torch.device('mps')
-                except AttributeError:
-                    pass
-            model = orig_model.to(dev)
-            model_path = args.model_prefix if args.model_prefix.endswith(
-                '.pt') else args.model_prefix + '_best_epoch_state.pt'
-            _logger.info('Loading model %s for eval' % model_path)
-            model.load_state_dict(torch.load(model_path, map_location=dev))
-            if gpus is not None and len(gpus) > 1:
-                model = torch.nn.DataParallel(model, device_ids=gpus)
-            model = model.to(dev)
-
-        for name, get_test_loader in test_loaders.items():
-            test_loader = get_test_loader()
-            # run prediction
-            if args.model_prefix.endswith('.onnx'):
-                _logger.info('Loading model %s for eval' % args.model_prefix)
-                from weaver.utils.nn.tools import evaluate_onnx
-                test_metric, scores, labels, observers = evaluate_onnx(args.model_prefix, test_loader)
-            else:
-                if args.embedding_mode:
-                    all_man_embed,all_tan_embed,all_labels = evaluate(
-                        model, test_loader, dev, epoch=None, for_training=False, tb_helper=tb, args = args)
+            if not args.model_prefix.endswith('.onnx'):
+                if args.predict_gpus:
+                    gpus = [int(i) for i in args.predict_gpus.split(',')]
+                    dev = torch.device(gpus[0])
                 else:
-                    test_metric, scores, labels, observers = evaluate(
-                        model, test_loader, dev, epoch=None, for_training=False, tb_helper=tb, args = args)
-                    _logger.info('Test metric %.5f' % test_metric, color='bold')
-            del test_loader
+                    gpus = None
+                    dev = torch.device('cpu')
+                    try:
+                        if torch.backends.mps.is_available():
+                            dev = torch.device('mps')
+                    except AttributeError:
+                        pass
+                model = orig_model.to(dev)
+                model_path = args.model_prefix if args.model_prefix.endswith(
+                    '.pt') else args.model_prefix + '_best_epoch_state.pt'
+                _logger.info('Loading model %s for eval' % model_path)
+                model.load_state_dict(torch.load(model_path, map_location=dev))
+                if gpus is not None and len(gpus) > 1:
+                    model = torch.nn.DataParallel(model, device_ids=gpus)
+                model = model.to(dev)
 
-            if args.predict_output:
-                if not os.path.dirname(args.predict_output):
-                    predict_output = os.path.join(
-                        os.path.dirname(args.model_prefix),
-                        'predict_output', args.predict_output)
+            for name, get_test_loader in test_loaders.items():
+                test_loader = get_test_loader()
+                # run prediction
+                if args.model_prefix.endswith('.onnx'):
+                    _logger.info('Loading model %s for eval' % args.model_prefix)
+                    from weaver.utils.nn.tools import evaluate_onnx
+                    test_metric, scores, labels, observers = evaluate_onnx(args.model_prefix, test_loader)
                 else:
-                    predict_output = args.predict_output
-                os.makedirs(os.path.dirname(predict_output), exist_ok=True)
-                if name == '':
-                    output_path = predict_output
-                else:
-                    base, ext = os.path.splitext(predict_output)
-                    output_path = base + '_' + name + ext
-                if output_path.endswith('.root'):
                     if args.embedding_mode:
-                        output_path = base + '_' + 'embedding' + ext
-                        save_root_embedding_space(args, output_path, data_config, all_man_embed, all_tan_embed, all_labels)
+                        all_man_embed,all_tan_embed,all_labels = evaluate(
+                            model, test_loader, dev, epoch=None, for_training=False, tb_helper=tb, args = args)
                     else:
-                        save_root(args, output_path, data_config, scores, labels, observers)
-                else:
-                    save_parquet(args, output_path, scores, labels, observers)
+                        test_metric, scores, labels, observers = evaluate(
+                            model, test_loader, dev, epoch=None, for_training=False, tb_helper=tb, args = args)
+                        _logger.info('Test metric %.5f' % test_metric, color='bold')
+                del test_loader
+
+                if args.predict_output:
+                    if not os.path.dirname(args.predict_output):
+                        predict_output = os.path.join(
+                            os.path.dirname(args.model_prefix),
+                            'predict_output', args.predict_output)
+                    else:
+                        predict_output = args.predict_output
+                    os.makedirs(os.path.dirname(predict_output), exist_ok=True)
+                    if name == '':
+                        output_path = predict_output
+                    else:
+                        base, ext = os.path.splitext(predict_output)
+                        output_path = base + '_' + name + ext
+                    if output_path.endswith('.root'):
+                        if args.embedding_mode:
+                            output_path = base + '_' + 'embedding' + ext
+                            save_root_embedding_space(args, output_path, data_config, all_man_embed, all_tan_embed, all_labels)
+                        else:
+                            save_root(args, output_path, data_config, scores, labels, observers)
+                    else:
+                        save_parquet(args, output_path, scores, labels, observers)
 
 
 def main():

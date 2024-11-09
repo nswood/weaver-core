@@ -367,7 +367,7 @@ class PMNN(nn.Module):
                  for_inference=False,
                  use_amp=False,
                  **kwargs) -> None:
-        super().__init__(**kwargs)
+        super().__init__()
         print('Classes')
         print(num_classes)
         
@@ -434,9 +434,9 @@ class PMNN(nn.Module):
                  
                 self.fc1.append(nn.Sequential(
                     Manifold_Linear(input_dim, int(input_dim + dim_dif*0.5),ball = man),
-                    Mob_Act(nn.ReLU(), man),
+                    nn.ReLU(),
                     Manifold_Linear(int(input_dim + dim_dif*0.5), int(input_dim + dim_dif*0.75), ball = man),
-                    Mob_Act(nn.ReLU(), man),
+                    nn.ReLU(),
                     Manifold_Linear(int(input_dim + dim_dif*0.75), part_dim,ball = man)
                                    ))
                                    
