@@ -79,6 +79,8 @@ def train_classification(
                 model_output = model(*inputs)
                 logits, label, _ = _flatten_preds(model_output, label=label, mask=mask)
                 loss = loss_func(logits, label)
+#             if args.clip_norm > 0:
+#                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_norm)
             if grad_scaler is None:
                 loss.backward()
                 if batch_idx % args.grad_accum == 0:
@@ -141,7 +143,7 @@ def train_classification(
             df = pd.DataFrame(columns=["epoch", "train_acc", "train_loss","val_acc", "val_loss"])
 
         
-        new_data = {"epoch": epoch, "train_acc": total_correct / count, "train_loss": total_loss / count}
+        new_data = {"epoch": epoch, "train_acc": total_correct / count, "train_loss": total_loss / num_batches}
 
         df = df.append(new_data, ignore_index=True)
         df.to_csv(args.output_file_path, index=False)

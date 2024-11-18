@@ -523,9 +523,13 @@ class PMBlock(nn.Module):
                     u = self.pre_attn_norm[i](u)
                 elif not self.remove_pm_norm_layers:
                     u = man.expmap0(self.pre_attn_norm[i](man.logmap0(u)))
-                    
+                
                 x = self.attn[i](x_cls, u, u, key_padding_mask=padding_mask_cur)[0]  # (1, batch, embed_dim)
                 x = man.projx(x)
+                
+#                 if torch.isnan(x).any():
+#                     print(f"Nan post attention {i}")
+                
             else:
                 residual = x
                 if man.name == 'Euclidean':
@@ -536,6 +540,9 @@ class PMBlock(nn.Module):
                 x = self.attn[i](x, x, x, key_padding_mask=padding_mask,
                               attn_mask=attn_mask)[0]  # (seq_len, batch, embed_dim)
                 x = man.projx(x)
+                
+#                 if torch.isnan(x).any():
+#                     print(f"Nan post attention {i}")
             
             if man.name == 'Euclidean':
                 x = x + residual
@@ -551,9 +558,12 @@ class PMBlock(nn.Module):
                 x = self.pre_fc_norm[i](x)
             elif not self.remove_pm_norm_layers:
                 x = man.expmap0(self.pre_fc_norm[i](man.logmap0(x)))
-                
+            
+#             if torch.isnan(x).any():
+#                 print(f"Nan post fc norm {i}")
             x = man.projx(x)
             x = self.fc1[i](x)
+#             x = man.expmap0(self.act_dropout(man.logmap0(x)))
             x = self.act_dropout(x)
             x = man.projx(x)
             x = self.fc2[i](x)
@@ -578,26 +588,6 @@ class PMBlock(nn.Module):
                 proc_jets = []
                 for i in range(self.n_man):
                     proc_jets.append(self.manifolds[i].mobius_scalar_mul(w_i[i], output[i]))
-            
-            # Novel midpoint method
-            elif self.inter_man_att_method =='v2':
-                tan_output = [self.manifolds[i].logmap0(output[i]) for i in range(self.n_man)]
-                mu = torch.stack(tan_output)
-                mu = torch.mean(mu, dim=0)
-                proj_mu = [self.w_man_att[i](self.manifolds[i].expmap0(mu)) for i in range(self.n_man)]
-                
-                # distance between x_i and mu projected onto M_i
-                d_i = []
-                for i in range(self.n_man):
-                    if self.manifolds[i].name =='Euclidean':
-                        d_i.append(torch.norm(output[i]-proj_mu[i],dim=-1))
-                    else:
-                        d_i.append(self.manifolds[i].dist(output[i],proj_mu[i]))
-
-                w_i = nn.Softmax(dim=0)(torch.stack(d_i,dim =0)).unsqueeze(-1)
-                proc_jets = []
-                for i in range(self.n_man):
-                    proc_jets.append(two_point_mid(output[i],proj_mu[i], self.manifolds[i],torch.ones(d_i[i].shape).to(d_i[i].device).unsqueeze(-1), d_i[i].unsqueeze(-1)))
             
             # Novel weighted midpoint method
             elif self.inter_man_att_method =='v3':
@@ -687,7 +677,7 @@ class PMTransformer(nn.Module):
                  remove_pm_norm_layers=False,
                  dropout_rate = 0.1,
                  curvature_init = 1.2,
-                 conv_embed = 'False',
+                 conv_embed = 'True',
                  clamp = -1,
                  **kwargs) -> None:
         super().__init__(**kwargs)
@@ -868,6 +858,8 @@ class PMTransformer(nn.Module):
         # for pytorch: uu (N, C', num_pairs), uu_idx (N, 2, num_pairs)
         # for onnx: uu (N, C', P, P), uu_idx=None
         
+        
+        
         with torch.no_grad():
             if not self.for_inference:
                 if uu_idx is not None:
@@ -896,16 +888,30 @@ class PMTransformer(nn.Module):
             # extract class token
               # (1, N, C)
             
+            
+#             for idx, tensor in enumerate(x_parts):
+#                 if torch.isnan(tensor).any():
+#                     print(f"Nan post part_embedding at index {idx}")
+
+            
             del cls_tokens
             del x
             
             # transform
             for block in self.blocks:
                 x_parts = block(x_parts, pm_x_cls=None, padding_mask=padding_mask, attn_mask=attn_mask)
-            
+                
+#             for idx, tensor in enumerate(x_parts):
+#                 if torch.isnan(tensor).any():
+#                     print(f"Nan post block at index {idx}")
+                
             for block in self.cls_blocks:
                 cls_tokens_parts = block(x_parts, pm_x_cls=cls_tokens_parts, padding_mask=padding_mask)
-                
+            
+#             for idx, tensor in enumerate(cls_tokens_parts):
+#                 if torch.isnan(tensor).any():
+#                     print(f"Nan post cls block at index {idx}")
+            
             cls_tokens_parts = [man.logmap0(cls_tokens_parts[i]) for i,man in enumerate(self.part_manifolds)]
             
             # Concatenate particle man outputs
@@ -914,6 +920,11 @@ class PMTransformer(nn.Module):
             else:
                 x_cls = cls_tokens_parts[0]
             del cls_tokens_parts
+            
+                
+#             for idx, tensor in enumerate(x_cls):
+#                 if torch.isnan(tensor).any():
+#                     print(f"Nan post cls log at index {idx}")
             
             # fc
             if self.jet_fc is None:
@@ -936,6 +947,10 @@ class PMTransformer(nn.Module):
             del x_cls
             
             x_jets = [self.jet_man_fc[i](x_jets[i]) for i in range(self.n_jet_man)]
+            
+#             for idx, tensor in enumerate(x_jets):
+#                 if torch.isnan(tensor).any():
+#                     print(f"Nan post jet_man_fc at index {idx}")
             
             if self.n_jet_man > 1:
                 
@@ -983,6 +998,11 @@ class PMTransformer(nn.Module):
                 proc_jets = x_jets
             
             x_jets_tan = [man.logmap0(proc_jets[i]) for i,man in enumerate(self.jet_manifolds)]
+            
+#             for idx, tensor in enumerate(x_jets_tan):
+#                 if torch.isnan(tensor).any():
+#                     print(f"Nan post jet log at index {idx}")
+                    
             if embed:
                 proc_jets = [torch.squeeze(a,0) for a in proc_jets]
                 x_jets_tan = [torch.squeeze(a,0) for a in x_jets_tan]

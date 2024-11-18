@@ -14,6 +14,7 @@ import torch.nn as nn
 import torch.nn.init as init
 import itertools
 import time
+from weaver.utils.logger import _logger
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -204,6 +205,8 @@ class ManifoldMHA(nn.Module):
                 key_layer_transposed = key_layer.transpose(-1, -2)
                 attention_scores = torch.matmul(self.ball.logmap0(query_layer), self.ball.logmap0(key_layer_transposed))
                 attention_scores =  attention_scores / self.scaling_factor
+#         if torch.isnan(attention_scores).any():
+#             print(f"Nan post att scores")
 
         
         # Apply the key_padding_mask if provided
@@ -227,6 +230,9 @@ class ManifoldMHA(nn.Module):
             context_layer = torch.matmul(attention_probs, value_layer)
         else:
             context_layer = self.ball.weighted_midpoint(value_layer, weights=attention_probs, reducedim=[-1], parts=query_parts, dim =-1,posweight = True)
+        
+#         if torch.isnan(context_layer).any():
+#             print(f"Nan post context layer")
         
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)

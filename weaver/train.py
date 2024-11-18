@@ -11,6 +11,8 @@ import numpy as np
 import math
 import copy
 import torch
+from filelock import FileLock
+import pandas as pd
 
 from torch.utils.data import DataLoader
 from weaver.utils.logger import _logger, _configLogger
@@ -145,6 +147,8 @@ parser.add_argument('--print', action='store_true', default=False,
                     help='do not run training/prediction but only print model information, e.g., FLOPs and number of parameters of a model')
 parser.add_argument('--profile', action='store_true', default=False,
                     help='run the profiler')
+parser.add_argument('--skip-test', action='store_true', default=False,
+                    help='if supplied skips testing model')
 parser.add_argument('--backend', type=str, choices=['gloo', 'nccl', 'mpi'], default=None,
                     help='backend for distributed training')
 parser.add_argument('--cross-validation', type=str, default=None,
@@ -162,7 +166,6 @@ parser.add_argument('--equal-heads', action='store_true', default=False,
 
 parser.add_argument('--PM-weight-initialization-factor', type=float, default=1,
                     help='Factor to initialize non-Euclidean weights relative to Euclidean')
-
 parser.add_argument('--dev-id',  type=str, default='NA',
                     help='Name for testing model types')
 parser.add_argument('--att-metric',  type=str, default='dist',choices=['dist', 'tan_space'],
@@ -178,6 +181,8 @@ parser.add_argument('--base-activations', type=str, default='act', choices=['act
                     help='Applies the base activations. Defaults to custom for PM models')
 parser.add_argument('--remove-pm-norm-layers', action='store_true', default=False,
                     help='removes PM normalization layers. Defaults to custom for PM models')
+parser.add_argument('--clip-norm', type=float, default=-1,
+                    help='Gradient clipping value. No clipping if -1, default = -1')
 
 
 
@@ -370,7 +375,7 @@ def onnx(args):
 
     from weaver.utils.dataset import DataConfig
     data_config = DataConfig.load(args.data_config, load_observers=False, load_reweight_info=False)
-    model, model_info, _ = model_setup(args, data_config)
+    model, model_info, _,params = model_setup(args, data_config)
     model.load_state_dict(torch.load(model_path, map_location='cpu'))
     model = model.cpu()
     model.eval()
@@ -412,6 +417,8 @@ def flops(model, model_info, device='cpu'):
     macs, params = get_model_complexity_info(model, inputs, as_strings=True, print_per_layer_stat=True, verbose=True)
     _logger.info('{:<30}  {:<8}'.format('Computational complexity: ', macs))
     _logger.info('{:<30}  {:<8}'.format('Number of parameters: ', params))
+    
+    return macs, params
 
 
 def profile(args, model, model_info, device):
@@ -662,7 +669,7 @@ def model_setup(args, data_config, device='cpu'):
             _logger.info('The following weights has been frozen:\n - %s',
                          '\n - '.join([name for name, p in model.named_parameters() if not p.requires_grad]))
     # _logger.info(model)
-    flops(model, model_info, device=device)
+    macs, params = flops(model, model_info, device=device)
     # loss function
     try:
         loss_func = network_module.get_loss(data_config, **network_options)
@@ -671,7 +678,7 @@ def model_setup(args, data_config, device='cpu'):
         loss_func = torch.nn.CrossEntropyLoss()
         _logger.warning('Loss function not defined in %s. Will use `torch.nn.CrossEntropyLoss()` by default.',
                         args.network_config)
-    return model, model_info, loss_func
+    return model, model_info, loss_func, params
 
 
 def iotest(args, data_loader):
@@ -904,7 +911,7 @@ def _main(args):
         iotest(args, data_loader)
         return
 
-    model, model_info, loss_func = model_setup(args, data_config, device=dev)
+    model, model_info, loss_func,params = model_setup(args, data_config, device=dev)
 
     # TODO: load checkpoint
     # if args.backend is not None:
@@ -977,6 +984,21 @@ def _main(args):
         if os.path.exists(output_file_path):
             os.remove(output_file_path)
         
+        lock_path = args.output_file_path + ".lock"
+        lock = FileLock(lock_path)
+
+        # Use the lock to ensure safe read/write operations
+        with lock:
+            if os.path.exists(args.output_file_path):
+                df = pd.read_csv(args.output_file_path)
+            else:
+                df = pd.DataFrame(columns=["params"])
+
+
+            new_data = {"params": params, }
+            df = df.append(new_data, ignore_index=True)
+            df.to_csv(args.output_file_path, index=False)
+        
         
         # training loop
         if args.regression_mode or args.embedding_mode:
@@ -996,13 +1018,13 @@ def _main(args):
                   steps_per_epoch=args.steps_per_epoch, grad_scaler=grad_scaler, tb_helper=tb,args = args)
             
             # Turn off per epoch saving, only save best
-            if False:
-                if args.model_prefix and (args.backend is None or local_rank == 0):
-                    dirname = os.path.dirname(args.model_prefix)
-                    if dirname and not os.path.exists(dirname):
-                        os.makedirs(dirname)
-                    state_dict = model.module.state_dict() if isinstance(
-                        model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)) else model.state_dict()
+            if args.model_prefix and (args.backend is None or local_rank == 0):
+                dirname = os.path.dirname(args.model_prefix)
+                if dirname and not os.path.exists(dirname):
+                    os.makedirs(dirname)
+                state_dict = model.module.state_dict() if isinstance(
+                    model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel)) else model.state_dict()
+                if not args.skip_test:
                     torch.save(state_dict, args.model_prefix + '_epoch-%d_state.pt' % epoch)
                     torch.save(opt.state_dict(), args.model_prefix + '_epoch-%d_optimizer.pt' % epoch)
             # if args.backend is not None and local_rank == 0:
@@ -1016,85 +1038,86 @@ def _main(args):
                 is_best_epoch = valid_metric < best_valid_metric
             else:
                 is_best_epoch = valid_metric > best_valid_metric
-                if valid_metric < 0.60 and last_valid_metric <0.60:
-                    break
+#                 if valid_metric < 0.60 and last_valid_metric <0.60:
+#                     break
             if is_best_epoch:
                 best_valid_metric = valid_metric
-#                 if args.model_prefix and (args.backend is None or local_rank == 0):
-#                     shutil.copy2(args.model_prefix + '_epoch-%d_state.pt' %
-#                                  epoch, args.model_prefix + '_best_epoch_state.pt')
-#                     # torch.save(model, args.model_prefix + '_best_epoch_full.pt')
+                if args.model_prefix and (args.backend is None or local_rank == 0):
+                    if not args.skip_test:
+                        shutil.copy2(args.model_prefix + '_epoch-%d_state.pt' %
+                                     epoch, args.model_prefix + '_best_epoch_state.pt')
+#                     torch.save(model, args.model_prefix + '_best_epoch_full.pt')
             _logger.info('Epoch #%d: Current validation metric: %.5f (best: %.5f)' %
                          (epoch, valid_metric, best_valid_metric), color='bold')
             last_valid_metric = valid_metric
     # Skipping over test dataset
-    if False:
-        if args.data_test:
-            if args.backend is not None and local_rank != 0:
-                return
-            if training_mode:
-                del train_loader, val_loader
-                test_loaders, data_config = test_load(args)
+#     if args.data_test:
+    if not args.skip_test:
+        if args.backend is not None and local_rank != 0:
+            return
+        if training_mode:
+            del train_loader, val_loader
+            test_loaders, data_config = test_load(args)
 
-            if not args.model_prefix.endswith('.onnx'):
-                if args.predict_gpus:
-                    gpus = [int(i) for i in args.predict_gpus.split(',')]
-                    dev = torch.device(gpus[0])
-                else:
-                    gpus = None
-                    dev = torch.device('cpu')
-                    try:
-                        if torch.backends.mps.is_available():
-                            dev = torch.device('mps')
-                    except AttributeError:
-                        pass
-                model = orig_model.to(dev)
-                model_path = args.model_prefix if args.model_prefix.endswith(
-                    '.pt') else args.model_prefix + '_best_epoch_state.pt'
-                _logger.info('Loading model %s for eval' % model_path)
-                model.load_state_dict(torch.load(model_path, map_location=dev))
-                if gpus is not None and len(gpus) > 1:
-                    model = torch.nn.DataParallel(model, device_ids=gpus)
-                model = model.to(dev)
+        if not args.model_prefix.endswith('.onnx'):
+            if args.predict_gpus:
+                gpus = [int(i) for i in args.predict_gpus.split(',')]
+                dev = torch.device(gpus[0])
+            else:
+                gpus = None
+                dev = torch.device('cpu')
+                try:
+                    if torch.backends.mps.is_available():
+                        dev = torch.device('mps')
+                except AttributeError:
+                    pass
+            model = orig_model.to(dev)
+            model_path = args.model_prefix if args.model_prefix.endswith(
+                '.pt') else args.model_prefix + '_best_epoch_state.pt'
+            _logger.info('Loading model %s for eval' % model_path)
+            model.load_state_dict(torch.load(model_path, map_location=dev))
+            if gpus is not None and len(gpus) > 1:
+                model = torch.nn.DataParallel(model, device_ids=gpus)
+            model = model.to(dev)
 
-            for name, get_test_loader in test_loaders.items():
-                test_loader = get_test_loader()
-                # run prediction
-                if args.model_prefix.endswith('.onnx'):
-                    _logger.info('Loading model %s for eval' % args.model_prefix)
-                    from weaver.utils.nn.tools import evaluate_onnx
-                    test_metric, scores, labels, observers = evaluate_onnx(args.model_prefix, test_loader)
+        for name, get_test_loader in test_loaders.items():
+            test_loader = get_test_loader()
+            # run prediction
+            if args.model_prefix.endswith('.onnx'):
+                _logger.info('Loading model %s for eval' % args.model_prefix)
+                from weaver.utils.nn.tools import evaluate_onnx
+                test_metric, scores, labels, observers = evaluate_onnx(args.model_prefix, test_loader)
+            else:
+                if args.embedding_mode:
+                    all_man_embed,all_tan_embed,all_labels = evaluate(
+                        model, test_loader, dev, epoch=None, for_training=False, tb_helper=tb, args = args)
                 else:
+                    test_metric, scores, labels, observers = evaluate(
+                        model, test_loader, dev, epoch=None, for_training=False, tb_helper=tb, args = args)
+                    _logger.info('Test metric %.5f' % test_metric, color='bold')
+            del test_loader
+
+            if args.predict_output:
+                if not os.path.dirname(args.predict_output):
+                    predict_output = os.path.join(
+                        os.path.dirname(args.model_prefix),
+                        'predict_output', args.predict_output)
+                else:
+                    predict_output = args.predict_output
+                os.makedirs(os.path.dirname(predict_output), exist_ok=True)
+                if name == '':
+                    output_path = predict_output
+                else:
+                    base, ext = os.path.splitext(predict_output)
+                    output_path = base + '_' + name + ext
+                if output_path.endswith('.root'):
                     if args.embedding_mode:
-                        all_man_embed,all_tan_embed,all_labels = evaluate(
-                            model, test_loader, dev, epoch=None, for_training=False, tb_helper=tb, args = args)
+                        output_path = base + '_' + 'embedding' + ext
+                        save_root_embedding_space(args, output_path, data_config, all_man_embed, all_tan_embed, all_labels)
                     else:
-                        test_metric, scores, labels, observers = evaluate(
-                            model, test_loader, dev, epoch=None, for_training=False, tb_helper=tb, args = args)
-                        _logger.info('Test metric %.5f' % test_metric, color='bold')
-                del test_loader
-
-                if args.predict_output:
-                    if not os.path.dirname(args.predict_output):
-                        predict_output = os.path.join(
-                            os.path.dirname(args.model_prefix),
-                            'predict_output', args.predict_output)
-                    else:
-                        predict_output = args.predict_output
-                    os.makedirs(os.path.dirname(predict_output), exist_ok=True)
-                    if name == '':
-                        output_path = predict_output
-                    else:
-                        base, ext = os.path.splitext(predict_output)
-                        output_path = base + '_' + name + ext
-                    if output_path.endswith('.root'):
-                        if args.embedding_mode:
-                            output_path = base + '_' + 'embedding' + ext
-                            save_root_embedding_space(args, output_path, data_config, all_man_embed, all_tan_embed, all_labels)
-                        else:
-                            save_root(args, output_path, data_config, scores, labels, observers)
-                    else:
-                        save_parquet(args, output_path, scores, labels, observers)
+                        save_root(args, output_path, data_config, scores, labels, observers)
+                else:
+                    save_parquet(args, output_path, scores, labels, observers)
 
 
 def main():

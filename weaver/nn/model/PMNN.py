@@ -264,6 +264,7 @@ from .PM_utils import *
 
 
 
+
 class PMBlock(nn.Module):
     def __init__(self,manifolds, embed_dim=128, num_heads=8, ffn_ratio=4,
                  dropout=0.1, attn_dropout=0.1, activation_dropout=0.1,
@@ -362,14 +363,15 @@ class PMNN(nn.Module):
                  jet_geom = None,
                  jet_dim = None,
                  activation='relu',
+                 PM_weight_initialization_factor = 1,
                  # misc
                  trim=True,
                  for_inference=False,
                  use_amp=False,
                  **kwargs) -> None:
         super().__init__()
-        print('Classes')
-        print(num_classes)
+#         print('Classes')
+#         print(num_classes)
         
         
         self.r = 0.6
@@ -379,16 +381,22 @@ class PMNN(nn.Module):
         self.act = nn.ReLU()
         
         self.n_man = len(parts)
+        n_flat = 0
+        n_hyp = 0
+        n_sphere = 0
         for i, m in enumerate(parts):
             if m == 'R':
                 self.part_manifolds.append(geoopt.Euclidean())
             elif m == 'H':
-                self.part_manifolds.append(geoopt.PoincareBall(c=1.2, learnable=True))
+                self.part_manifolds.append(geoopt.PoincareBallExact(c=1.2*2**(n_hyp), learnable=True))
+                n_hyp += 1
             elif m == 'S':
-                self.part_manifolds.append(geoopt.SphereProjection(k=1.0, learnable=True))
+                self.part_manifolds.append(geoopt.SphereProjectionExact(k=1.0*2**(n_sphere), learnable=True))
+                n_sphere += 1
+                
+        self.layer_norms = nn.ModuleList()
         
         self.fc1 = nn.ModuleList()
-        self.fc2 = nn.ModuleList()
 #         self.fc1 = nn.ModuleList()
 #         self.fc2 = nn.ModuleList()
         
@@ -423,21 +431,22 @@ class PMNN(nn.Module):
             self.theta_man_att = nn.ModuleList()
         dim_dif = part_dim - input_dim
         for man in self.part_manifolds:
+            self.layer_norms.append(nn.LayerNorm(part_dim))
             if man.name =='Euclidean':
                 self.fc1.append(nn.Sequential(
-                    Manifold_Linear(input_dim, int(input_dim + dim_dif*0.5),ball = man),
+                    Manifold_Linear(input_dim, int(input_dim + dim_dif*0.5),ball = man,weight_init_ratio = PM_weight_initialization_factor),
                     nn.ReLU(),
-                    Manifold_Linear(int(input_dim + dim_dif*0.5), int(input_dim + dim_dif*0.75),ball = man),
+                    Manifold_Linear(int(input_dim + dim_dif*0.5), int(input_dim + dim_dif*0.75),ball = man,weight_init_ratio = PM_weight_initialization_factor),
                     nn.ReLU(),
-                    Manifold_Linear(int(input_dim + dim_dif*0.75), part_dim,ball = man)))
+                    Manifold_Linear(int(input_dim + dim_dif*0.75), part_dim,ball = man,weight_init_ratio = PM_weight_initialization_factor)))
             else:
                  
                 self.fc1.append(nn.Sequential(
-                    Manifold_Linear(input_dim, int(input_dim + dim_dif*0.5),ball = man),
+                    Manifold_Linear(input_dim, int(input_dim + dim_dif*0.5),ball = man,weight_init_ratio = PM_weight_initialization_factor),
                     nn.ReLU(),
-                    Manifold_Linear(int(input_dim + dim_dif*0.5), int(input_dim + dim_dif*0.75), ball = man),
+                    Manifold_Linear(int(input_dim + dim_dif*0.5), int(input_dim + dim_dif*0.75), ball = man,weight_init_ratio = PM_weight_initialization_factor),
                     nn.ReLU(),
-                    Manifold_Linear(int(input_dim + dim_dif*0.75), part_dim,ball = man)
+                    Manifold_Linear(int(input_dim + dim_dif*0.75), part_dim,ball = man,weight_init_ratio = PM_weight_initialization_factor)
                                    ))
                                    
 #                 self.fc1.append(nn.Sequential(Manifold_Linear(input_dim, part_dim,ball = man),
@@ -448,15 +457,14 @@ class PMNN(nn.Module):
                 self.w_man_att.append(Manifold_Linear(part_dim, part_dim ,ball = man))
                 self.theta_man_att.append(nn.Linear(part_dim, 1))
         
-        
 
         self.n_part_man = len(self.part_manifolds)
-        
         self.trimmer = SequenceTrimmer(enabled=trim and not for_inference)
         self.for_inference = for_inference
         self.use_amp = use_amp
-        
-        self.final_fc = nn.Sequential(nn.Linear(part_dim*self.n_man, num_classes),nn.ReLU(),nn.Linear(num_classes, num_classes))
+        self.final_fc = nn.Sequential(nn.Linear(part_dim*self.n_man, num_classes),
+                                      nn.ReLU(),
+                                      nn.Linear(num_classes, num_classes))
 
     @torch.jit.ignore
     def no_weight_decay(self):
@@ -476,19 +484,18 @@ class PMNN(nn.Module):
         with torch.cuda.amp.autocast(enabled=self.use_amp):
             pm_x = []
             for i,man in enumerate(self.part_manifolds):
-#                 if 'Poincare' in self.part_manifolds[i].name:
-                    #Clamp
-#                     x = torch.clamp(self.r/x.norm(dim=2), max = -1).unsqueeze(-1)*x
                 pm_x.append(man.expmap0(x))
                 
             output = []
             for i, man in enumerate(self.part_manifolds):
                 x = pm_x[i]
                 x = self.fc1[i](x)
-                if man.name == 'Euclidean':
-                    x = self.act(x)
+                if man.name != 'Euclidean':
+                    x = man.expmap0(self.layer_norms[i](man.logmap0(x)))
+                else:
+                    x = self.layer_norms[i](x) 
                 output.append(x)
-        
+            
             if self.n_man > 1:
                 tan_output = [self.part_manifolds[i].logmap0(self.w_man_att[i](output[i])) for i in range(self.n_man)]
                 mu = torch.stack(tan_output)
@@ -500,6 +507,8 @@ class PMNN(nn.Module):
                     proc_jets.append(self.part_manifolds[i].mobius_scalar_mul(w_i[i], output[i]))
             else:
                 proc_jets = output
+                
+            
             output =[torch.mean(self.part_manifolds[i].logmap0(proc_jets[i]),dim = 1) for i in range(self.n_man)]
 
             output = torch.cat(output,dim=-1)
@@ -508,7 +517,8 @@ class PMNN(nn.Module):
             
             if self.for_inference:
                 output = torch.softmax(output, dim=1)
-            # print('output:\n', output)
+                
+                
             return output
 
 
