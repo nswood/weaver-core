@@ -376,7 +376,6 @@ import os
 os.environ['PYTHONPATH'] = '/n/home11/nswood/weaver-core/weaver/nn/model'
 
 from weaver.nn.model.PM_utils import *
-from weaver.nn.model.riemannian_batch_norm import *
 
 def two_point_mid(x1,x2, man, w1,w2):
     if man.name == 'Euclidean':
