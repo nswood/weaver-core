@@ -12,6 +12,12 @@ from functools import partial
 
 from weaver.utils.logger import _logger
 
+import os
+
+os.environ['PYTHONPATH'] = '/n/home11/nswood/weaver-core/weaver/nn/model'
+
+
+from .PM_utils import *
 
 @torch.jit.script
 def delta_phi(a, b):
@@ -255,98 +261,6 @@ class Embed(nn.Module):
         return self.embed(x)
 
 
-
-# Import PM layers
-import os
-os.environ['PYTHONPATH'] = '/n/home11/nswood/weaver-core/weaver/nn/model'
-
-from .PM_utils import *
-
-
-
-
-class PMBlock(nn.Module):
-    def __init__(self,manifolds, embed_dim=128, num_heads=8, ffn_ratio=4,
-                 dropout=0.1, attn_dropout=0.1, activation_dropout=0.1,
-                 add_bias_kv=False, activation='relu',
-                 scale_fc=True, scale_attn=True, scale_heads=False, scale_resids=True,man_att = False):
-        super().__init__()
-        
-        self.part_manifolds = manifolds
-        self.n_man = len(manifolds)
-        self.man_att = man_att
-        self.man_att_dim = embed_dim
-        self.embed_dim = embed_dim
-    
-        self.dropout = nn.Dropout(dropout)
-        self.act = nn.ReLU()
-        self.act_dropout = nn.Dropout(activation_dropout)
-        
-        
-        self.fc1 = nn.ModuleList()
-        if self.n_man > 1:
-            self.w_man_att = nn.ModuleList() if man_att else None
-            self.theta_man_att = nn.ModuleList() if man_att else None
-        
-        for man in manifolds:
-            self.fc1.append(Manifold_Linear(embed_dim, self.ffn_dim,ball = man))
-            self.fc2.append(Manifold_Linear(self.ffn_dim, embed_dim,ball = man))
-            self.attn.append(ManifoldMHA(embed_dim,num_heads,dropout=attn_dropout, ball = man))
-            if scale_heads:
-                self.c_attn.append(nn.Parameter(torch.ones(num_heads), requires_grad=True))
-            if scale_resids:
-                self.w_resid.append(nn.Parameter(torch.ones(embed_dim), requires_grad=True))
-            if self.n_man > 1:
-                if self.man_att:
-                    self.w_man_att.append(Manifold_Linear(embed_dim, self.man_att_dim ,ball = man))
-                    self.theta_man_att.append(nn.Linear(self.man_att_dim, 1))
-                
-
-    def forward(self,  pm_x, pm_x_cls=None, padding_mask=None, attn_mask=None):
-        """
-        Args:
-            x (Tensor): input to the layer of shape `(n_man, seq_len, batch, embed_dim)`
-            x_cls (Tensor, optional): class token input to the layer of shape `(n_man, 1, batch, embed_dim)`
-            padding_mask (ByteTensor, optional): binary
-                ByteTensor of shape `(batch, seq_len)` where padding
-                elements are indicated by ``1``.
-
-        Returns:
-            encoded output of shape `(n_man, seq_len, batch, embed_dim)`
-        """
-#         print('Padding mask')
-#         print(padding_mask.shape)
-        output = []
-        for i, man in enumerate(self.part_manifolds):
-            x = pm_x[i]
-            x = self.act(self.fc1[i](x))
-
-            output.append(x)
-        
-        if self.man_att and self.n_man > 1:
-            tan_output = [self.part_manifolds[i].logmap0(self.w_man_att[i](output[i])) for i in range(self.n_man)]
-            mu = torch.stack(tan_output)
-            mu = torch.mean(mu, dim=0)
-            inter_att = [self.theta_man_att[i](tan_output[i]-mu) for i in range(self.n_man)]
-            w_i = nn.Softmax(dim=0)(torch.stack(inter_att,dim =0))
-            proc_jets = []
-            for i in range(self.n_man):
-                proc_jets.append(self.part_manifolds[i].mobius_scalar_mul(w_i[i], output[i]))
-        else:
-            proc_jets = output
-        flat_inputs =[torch.mean(self.part_manifolds[i].logmap0(proc_jets[i]),dim = 1) for i in range(self.n_man)]
-        
-        h = torch.cat(flat_inputs,dim=-1)
-        
-        h = self.final_embedder(h)
-        
-        if self.softmax:
-            h = nn.Softmax(dim=1)(h)
-        
-        return h
-        
-        
-
     
 class PMNN(nn.Module):
 
@@ -370,8 +284,7 @@ class PMNN(nn.Module):
                  use_amp=False,
                  **kwargs) -> None:
         super().__init__()
-#         print('Classes')
-#         print(num_classes)
+
         
         
         self.r = 0.6
@@ -397,35 +310,6 @@ class PMNN(nn.Module):
         self.layer_norms = nn.ModuleList()
         
         self.fc1 = nn.ModuleList()
-#         self.fc1 = nn.ModuleList()
-#         self.fc2 = nn.ModuleList()
-        
-#         if self.n_man > 1:
-#             self.w_man_att = nn.ModuleList()
-#             self.theta_man_att = nn.ModuleList()
-#         dim_dif = part_dim - input_dim
-#         for man in self.part_manifolds:
-#             self.fc1.append(nn.Sequential(
-#                 nn.Linear(input_dim, int(input_dim + dim_dif*0.5)),
-#                 nn.ReLU(),
-#                 nn.Linear(int(input_dim + dim_dif*0.5), int(input_dim + dim_dif*0.75)),
-#                 nn.ReLU(),
-#                 nn.Linear(int(input_dim + dim_dif*0.75), part_dim)))
-#             if man.name =='Euclidean':
-#                 self.fc2.append(nn.Sequential(
-#                     Manifold_Linear(part_dim, part_dim,ball = man),
-#                     nn.ReLU(),
-#                     Manifold_Linear(part_dim, part_dim,ball = man),
-#                     nn.ReLU(),
-#                     Manifold_Linear(part_dim, part_dim,ball = man)))
-#             else:
-#                 self.fc2.append(nn.Sequential(
-#                     Manifold_Linear(part_dim, part_dim,ball = man),
-#                     Mob_Act(nn.ReLU(), man),
-#                     Manifold_Linear(part_dim, part_dim,ball = man),
-#                     Mob_Act(nn.ReLU(), man),
-#                     Manifold_Linear(part_dim, part_dim,ball = man)
-#                                    ))
         if self.n_man > 1:
             self.w_man_att = nn.ModuleList()
             self.theta_man_att = nn.ModuleList()
@@ -456,11 +340,7 @@ class PMNN(nn.Module):
                     nn.ReLU(),
                     Manifold_Linear(int(input_dim + dim_dif*0.75), part_dim,ball = man,weight_init_ratio = PM_weight_initialization_factor)
                                    ))
-                                   
-#                 self.fc1.append(nn.Sequential(Manifold_Linear(input_dim, part_dim,ball = man),
-#                                              Manifold_Linear(part_dim, part_dim,ball = man),
-#                                              Manifold_Linear(part_dim, part_dim,ball = man)))
-                
+                                                   
             if self.n_man > 1:
                 self.w_man_att.append(Manifold_Linear(part_dim, part_dim ,ball = man))
                 self.theta_man_att.append(nn.Linear(part_dim, 1))
