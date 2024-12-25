@@ -1,3 +1,7 @@
+'''
+Paper: "Product Manifold Machine Learning for Physics" - https://arxiv.org/abs/2412.07033
+'''
+
 import sys
 import matplotlib.pyplot as plt
 import geoopt
