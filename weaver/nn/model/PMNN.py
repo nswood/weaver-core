@@ -439,8 +439,16 @@ class PMNN(nn.Module):
                     Manifold_Linear(int(input_dim + dim_dif*0.5), int(input_dim + dim_dif*0.75),ball = man,weight_init_ratio = PM_weight_initialization_factor),
                     nn.ReLU(),
                     Manifold_Linear(int(input_dim + dim_dif*0.75), part_dim,ball = man,weight_init_ratio = PM_weight_initialization_factor)))
+                
+            elif man.name =='SphereProjectionExact':
+                self.fc1.append(nn.Sequential(
+                    Manifold_Linear(input_dim, int(input_dim + dim_dif*0.5),ball = man,weight_init_ratio = PM_weight_initialization_factor),
+                    Mob_Act(nn.ReLU(), man),
+                    Manifold_Linear(int(input_dim + dim_dif*0.5), int(input_dim + dim_dif*0.75), ball = man,weight_init_ratio = PM_weight_initialization_factor),
+                    Mob_Act(nn.ReLU(), man),
+                    Manifold_Linear(int(input_dim + dim_dif*0.75), part_dim,ball = man,weight_init_ratio = PM_weight_initialization_factor)
+                                   ))
             else:
-                 
                 self.fc1.append(nn.Sequential(
                     Manifold_Linear(input_dim, int(input_dim + dim_dif*0.5),ball = man,weight_init_ratio = PM_weight_initialization_factor),
                     nn.ReLU(),
@@ -470,7 +478,7 @@ class PMNN(nn.Module):
     def no_weight_decay(self):
         return {'cls_token', }
 
-    def forward(self, x, v=None, mask=None, uu=None, uu_idx=None):
+    def forward(self, x, v=None, mask=None, uu=None, uu_idx=None, embed_parts = False):
         # x: (N, C, P)
         # v: (N, 4, P) [px,py,pz,energy]
         # mask: (N, 1, P) -- real particle = 1, padded = 0
@@ -507,9 +515,12 @@ class PMNN(nn.Module):
                     proc_jets.append(self.part_manifolds[i].mobius_scalar_mul(w_i[i], output[i]))
             else:
                 proc_jets = output
-                
             
-            output =[torch.mean(self.part_manifolds[i].logmap0(proc_jets[i]),dim = 1) for i in range(self.n_man)]
+            if embed_parts:
+                curv = self.part_manifolds[0].k if self.part_manifolds[0].name != 'Euclidean' else 0
+                return proc_jets[0], self.part_manifolds[i].logmap0(proc_jets[0]), curv
+            
+            output = [torch.mean(self.part_manifolds[i].logmap0(proc_jets[i]),dim = 1) for i in range(self.n_man)]
 
             output = torch.cat(output,dim=-1)
 

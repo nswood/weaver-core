@@ -165,7 +165,7 @@ def train_classification(
 
 def evaluate_classification(model, test_loader, dev, epoch, for_training=True, loss_func=None, steps_per_epoch=None,
                             eval_metrics=['roc_auc_score', 'roc_auc_score_matrix', 'confusion_matrix'],
-                            tb_helper=None,args = None):
+                            tb_helper=None,args = None, name = 'NA'):
     model.eval()
 
     data_config = test_loader.dataset.config
@@ -181,116 +181,151 @@ def evaluate_classification(model, test_loader, dev, epoch, for_training=True, l
     labels_counts = []
     observers = defaultdict(list)
     start_time = time.time()
-    with torch.no_grad():
-        with tqdm.tqdm(test_loader) as tq:
-            for X, y, Z in tq:
-                # X, y: torch.Tensor; Z: ak.Array
-                inputs = [X[k].to(dev) for k in data_config.input_names]
-                label = y[data_config.label_names[0]].long().to(dev)
-                entry_count += label.shape[0]
-                try:
-                    mask = y[data_config.label_names[0] + '_mask'].bool().to(dev)
-                except KeyError:
-                    mask = None
-                model_output = model(*inputs)
-                logits, label, mask = _flatten_preds(model_output, label=label, mask=mask)
-                scores.append(torch.softmax(logits.float(), dim=1).numpy(force=True))
-
-                if mask is not None:
-                    mask = mask.cpu()
-                for k, v in y.items():
-                    labels[k].append(_flatten_label(v, mask).numpy(force=True))
-                if not for_training:
-                    for k, v in Z.items():
-                        observers[k].append(v)
-
-                num_examples = label.shape[0]
-                label_counter.update(label.numpy(force=True))
-                if not for_training and mask is not None:
-                    labels_counts.append(np.squeeze(mask.numpy(force=True).sum(axis=-1)))
-
-                _, preds = logits.max(1)
-                loss = 0 if loss_func is None else loss_func(logits, label).item()
-
-                num_batches += 1
-                count += num_examples
-                correct = (preds == label).sum().item()
-                total_loss += loss * num_examples
-                total_correct += correct
-
-                tq.set_postfix({
-                    'Loss': '%.5f' % loss,
-                    'AvgLoss': '%.5f' % (total_loss / count),
-                    'Acc': '%.5f' % (correct / num_examples),
-                    'AvgAcc': '%.5f' % (total_correct / count)})
-
-                if tb_helper:
-                    if tb_helper.custom_fn:
-                        with torch.no_grad():
-                            tb_helper.custom_fn(model_output=model_output, model=model, epoch=epoch,
-                                                i_batch=num_batches, mode='eval' if for_training else 'test')
-
-                if steps_per_epoch is not None and num_batches >= steps_per_epoch:
-                    break
-
-    time_diff = time.time() - start_time
-    _logger.info('Processed %d entries in total (avg. speed %.1f entries/s)' % (entry_count, entry_count / time_diff))
-    _logger.info('Evaluation class distribution: \n    %s', str(sorted(label_counter.items())))
-
-    if tb_helper:
-        tb_mode = 'eval' if for_training else 'test'
-        tb_helper.write_scalars([
-            ("Loss/%s (epoch)" % tb_mode, total_loss / count, epoch),
-            ("Acc/%s (epoch)" % tb_mode, total_correct / count, epoch),
-        ])
-        if tb_helper.custom_fn:
-            with torch.no_grad():
-                tb_helper.custom_fn(model_output=model_output, model=model, epoch=epoch, i_batch=-1, mode=tb_mode)
-
-    scores = np.concatenate(scores)
-    labels = {k: _concat(v) for k, v in labels.items()}
-    metric_results = evaluate_metrics(labels[data_config.label_names[0]], scores, eval_metrics=eval_metrics)
-    _logger.info('Evaluation metrics: \n%s', '\n'.join(
-        ['    - %s: \n%s' % (k, str(v)) for k, v in metric_results.items()]))
-    
-#     print('SHOULD BE PRINTING')
-#     print(args.output_file_path)
-    # Define the lock file (it will be a temporary file for locking purposes)
-    lock_path = args.output_file_path + ".lock"
-    lock = FileLock(lock_path)
-
-    # Use the lock to ensure safe read/write operations
-    with lock:
-        df = pd.read_csv(args.output_file_path)
-
-        if epoch is None:
-            new_data = {"test_acc": total_correct / count, "test_loss": total_loss / count, "test_auc": metric_results['roc_auc_score']}
-        else:
-            new_data = {"epoch": epoch, "val_acc": total_correct / count, "val_loss": total_loss / count}
-
-        df = df.append(new_data, ignore_index=True)
-        df.to_csv(args.output_file_path, index=False)
-
-    
-    if for_training:
-        return total_correct / count
+    if args.predict_part_embed:
+        with torch.no_grad():
+            with tqdm.tqdm(test_loader) as tq:
+                i = 0
+                for X, y, Z in tq:
+                    # X, y: torch.Tensor; Z: ak.Array
+                    inputs = [X[k].to(dev) for k in data_config.input_names]
+                    label = y[data_config.label_names[0]].long().to(dev)
+                    entry_count += label.shape[0]
+                    try:
+                        mask = y[data_config.label_names[0] + '_mask'].bool().to(dev)
+                    except KeyError:
+                        mask = None
+                    model_output = model(*inputs,embed_parts = True)
+                    man_parts, tan_space_parts, curv = model_output
+                    data_to_save = {
+                                    'man_parts': man_parts,            # 3D tensor
+                                    'tan_space_parts': tan_space_parts,  # 3D tensor
+                                    'curv': curv,                      # float
+                                    'X': X,              # Convert np.array to torch tensor
+                                    'y': y,              # Convert np.array to torch tensor
+                                    }
+                    output_path = f'{args.model_prefix[:args.model_prefix.rfind("/")]}/predict_output/part_output_{name}_{i}.pt'
+                    i = i + 1 
+                    torch.save(data_to_save, output_path)
+                    _logger.info(f'Data saved to {output_path}')
+                    if i == 10:
+                        return ''
+        
     else:
-        # convert 2D labels/scores
-        if len(scores) != entry_count:
-            if len(labels_counts):
-                labels_counts = np.concatenate(labels_counts)
-                scores = ak.unflatten(scores, labels_counts)
-                for k, v in labels.items():
-                    labels[k] = ak.unflatten(v, labels_counts)
+        with torch.no_grad():
+            with tqdm.tqdm(test_loader) as tq:
+                for X, y, Z in tq:
+                    # X, y: torch.Tensor; Z: ak.Array
+                    inputs = [X[k].to(dev) for k in data_config.input_names]
+                    label = y[data_config.label_names[0]].long().to(dev)
+                    entry_count += label.shape[0]
+                    try:
+                        mask = y[data_config.label_names[0] + '_mask'].bool().to(dev)
+                    except KeyError:
+                        mask = None
+
+
+                    
+                    model_output = model(*inputs)
+
+
+                    logits, label, mask = _flatten_preds(model_output, label=label, mask=mask)
+                    scores.append(torch.softmax(logits.float(), dim=1).numpy(force=True))
+
+                    if mask is not None:
+                        mask = mask.cpu()
+                    for k, v in y.items():
+                        labels[k].append(_flatten_label(v, mask).numpy(force=True))
+                    if not for_training:
+                        for k, v in Z.items():
+                            observers[k].append(v)
+
+                    num_examples = label.shape[0]
+                    label_counter.update(label.numpy(force=True))
+                    if not for_training and mask is not None:
+                        labels_counts.append(np.squeeze(mask.numpy(force=True).sum(axis=-1)))
+
+                    _, preds = logits.max(1)
+                    loss = 0 if loss_func is None else loss_func(logits, label).item()
+
+                    num_batches += 1
+                    count += num_examples
+                    correct = (preds == label).sum().item()
+                    total_loss += loss * num_examples
+                    total_correct += correct
+
+                    tq.set_postfix({
+                        'Loss': '%.5f' % loss,
+                        'AvgLoss': '%.5f' % (total_loss / count),
+                        'Acc': '%.5f' % (correct / num_examples),
+                        'AvgAcc': '%.5f' % (total_correct / count)})
+
+                    if tb_helper:
+                        if tb_helper.custom_fn:
+                            with torch.no_grad():
+                                tb_helper.custom_fn(model_output=model_output, model=model, epoch=epoch,
+                                                    i_batch=num_batches, mode='eval' if for_training else 'test')
+
+                    if steps_per_epoch is not None and num_batches >= steps_per_epoch:
+                        break
+
+        time_diff = time.time() - start_time
+        _logger.info('Processed %d entries in total (avg. speed %.1f entries/s)' % (entry_count, entry_count / time_diff))
+        _logger.info('Evaluation class distribution: \n    %s', str(sorted(label_counter.items())))
+
+        if tb_helper:
+            tb_mode = 'eval' if for_training else 'test'
+            tb_helper.write_scalars([
+                ("Loss/%s (epoch)" % tb_mode, total_loss / count, epoch),
+                ("Acc/%s (epoch)" % tb_mode, total_correct / count, epoch),
+            ])
+            if tb_helper.custom_fn:
+                with torch.no_grad():
+                    tb_helper.custom_fn(model_output=model_output, model=model, epoch=epoch, i_batch=-1, mode=tb_mode)
+
+        scores = np.concatenate(scores)
+        labels = {k: _concat(v) for k, v in labels.items()}
+        metric_results = evaluate_metrics(labels[data_config.label_names[0]], scores, eval_metrics=eval_metrics)
+        _logger.info('Evaluation metrics: \n%s', '\n'.join(
+            ['    - %s: \n%s' % (k, str(v)) for k, v in metric_results.items()]))
+
+    #     print('SHOULD BE PRINTING')
+    #     print(args.output_file_path)
+        # Define the lock file (it will be a temporary file for locking purposes)
+        lock_path = args.output_file_path + ".lock"
+        lock = FileLock(lock_path)
+
+        # Use the lock to ensure safe read/write operations
+        with lock:
+            df = pd.read_csv(args.output_file_path)
+
+            if epoch is None:
+                new_data = {"test_acc": total_correct / count, "test_loss": total_loss / count, "test_auc": metric_results['roc_auc_score']}
             else:
-                assert (count % entry_count == 0)
-                scores = scores.reshape((entry_count, int(count / entry_count), -1)).transpose((1, 2))
-                for k, v in labels.items():
-                    labels[k] = v.reshape((entry_count, -1))
-        observers = {k: _concat(v) for k, v in observers.items()}
-        
-        
-        return total_correct / count, scores, labels, observers
+                new_data = {"epoch": epoch, "val_acc": total_correct / count, "val_loss": total_loss / count}
+
+            df = df.append(new_data, ignore_index=True)
+            df.to_csv(args.output_file_path, index=False)
+
+
+        if for_training:
+            return total_correct / count
+        else:
+            # convert 2D labels/scores
+            if len(scores) != entry_count:
+                if len(labels_counts):
+                    labels_counts = np.concatenate(labels_counts)
+                    scores = ak.unflatten(scores, labels_counts)
+                    for k, v in labels.items():
+                        labels[k] = ak.unflatten(v, labels_counts)
+                else:
+                    assert (count % entry_count == 0)
+                    scores = scores.reshape((entry_count, int(count / entry_count), -1)).transpose((1, 2))
+                    for k, v in labels.items():
+                        labels[k] = v.reshape((entry_count, -1))
+            observers = {k: _concat(v) for k, v in observers.items()}
+
+
+            return total_correct / count, scores, labels, observers
 
 
 def train_embedding(

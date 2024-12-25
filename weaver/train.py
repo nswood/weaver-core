@@ -130,6 +130,8 @@ parser.add_argument('--num-workers', type=int, default=1,
                     help='number of threads to load the dataset; memory consumption and disk access load increases (~linearly) with this numbers')
 parser.add_argument('--predict', action='store_true', default=False,
                     help='run prediction instead of training')
+parser.add_argument('--predict-part-embed', action='store_true', default=False,
+                    help='save particle embedding')
 parser.add_argument('--predict-output', type=str,
                     help='path to save the prediction output, support `.root` and `.parquet` format')
 parser.add_argument('--export-onnx', type=str, default=None,
@@ -183,6 +185,9 @@ parser.add_argument('--remove-pm-norm-layers', action='store_true', default=Fals
                     help='removes PM normalization layers. Defaults to custom for PM models')
 parser.add_argument('--clip-norm', type=float, default=-1,
                     help='Gradient clipping value. No clipping if -1, default = -1')
+parser.add_argument('--fix-c-after-load', action='store_true', default=False,
+                    help='Fixes curvature after continuing training, default = False')
+
 
 
 
@@ -554,7 +559,38 @@ def optim(args, model, device):
             opt.load_state_dict(opt_state)
         else:
             _logger.warning('Optimizer state file %s NOT found!' % opt_state_file)
+            
+        if args.fix_c_after_load:
+            ## Check if they have 'k' first
+            _logger.info('Fixing particle curvatures at')
+            if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                part_mans = model.module.part_manifolds
+            else:
+                part_mans = model.mod.part_manifolds
 
+            for i, manifold in enumerate(part_mans):
+                if manifold.name == 'PoincareBallExact':
+                    part_mans[i] = geoopt.PoincareBallExact(c=-1 * manifold.k, learnable=False)
+                    _logger.info(f'{part_mans[i].name}: {part_mans[i].k}')
+                elif manifold.name == 'SphereProjectionExact':
+                    part_mans[i] = geoopt.SphereProjectionExact(k=manifold.k, learnable=False)
+                    _logger.info(f'{part_mans[i].name}: {part_mans[i].k}')
+
+            # Disable 'k' for jet_manifolds
+            _logger.info('Fixing jet curvatures at')
+            if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                jet_mans = model.module.jet_manifolds
+            else:
+                jet_mans = model.mod.jet_manifolds
+
+            for i, manifold in enumerate(jet_mans):
+                if manifold.name == 'PoincareBallExact':
+                    jet_mans[i] = geoopt.PoincareBallExact(c=-1 * manifold.k, learnable=False)
+                    _logger.info(f'{jet_mans[i].name}: {jet_mans[i].k}')
+                elif manifold.name == 'SphereProjectionExact':
+                    jet_mans[i] = geoopt.SphereProjectionExact(k=manifold.k, learnable=False)
+                    _logger.info(f'{jet_mans[i].name}: {jet_mans[i].k}')
+        
     scheduler = None
     if args.lr_finder is None:
         if args.lr_scheduler == 'steps':
@@ -1030,7 +1066,38 @@ def _main(args):
             # if args.backend is not None and local_rank == 0:
             # TODO: save checkpoint
             #     save_checkpoint()
+            
+            # Fixes curvature in last 5 epochs
+#             if int(args.num_epochs - epoch) == 5:
+#                 _logger.info('Fixing particle curvatures at')
+#                 if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+#                     part_mans = model.module.part_manifolds
+#                 else:
+#                     part_mans = model.mod.part_manifolds
 
+#                 for i, manifold in enumerate(part_mans):
+#                     if manifold.name == 'PoincareBallExact':
+#                         part_mans[i] = geoopt.PoincareBallExact(c=-1 * manifold.k, learnable=False)
+#                         _logger.info(f'{part_mans[i].name}: {part_mans[i].k}')
+#                     elif manifold.name == 'SphereProjectionExact':
+#                         part_mans[i] = geoopt.SphereProjectionExact(k=manifold.k, learnable=False)
+#                         _logger.info(f'{part_mans[i].name}: {part_mans[i].k}')
+
+                # Disable 'k' for jet_manifolds
+#                 _logger.info('Fixing jet curvatures at')
+#                 if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+#                     jet_mans = model.module.jet_manifolds
+#                 else:
+#                     jet_mans = model.mod.jet_manifolds
+
+#                 for i, manifold in enumerate(jet_mans):
+#                     if manifold.name == 'PoincareBallExact':
+#                         jet_mans[i] = geoopt.PoincareBallExact(c=-1 * manifold.k, learnable=False)
+#                         _logger.info(f'{jet_mans[i].name}: {jet_mans[i].k}')
+#                     elif manifold.name == 'SphereProjectionExact':
+#                         jet_mans[i] = geoopt.SphereProjectionExact(k=manifold.k, learnable=False)
+#                         _logger.info(f'{jet_mans[i].name}: {jet_mans[i].k}')
+                
             _logger.info('Epoch #%d validating' % epoch)
             valid_metric = evaluate(model, val_loader, dev, epoch, loss_func=loss_func,
                                     steps_per_epoch=args.steps_per_epoch_val, tb_helper=tb,args = args)
@@ -1038,8 +1105,8 @@ def _main(args):
                 is_best_epoch = valid_metric < best_valid_metric
             else:
                 is_best_epoch = valid_metric > best_valid_metric
-#                 if valid_metric < 0.60 and last_valid_metric <0.60:
-#                     break
+                if valid_metric < 0.60 and last_valid_metric <0.60:
+                    break
             if is_best_epoch:
                 best_valid_metric = valid_metric
                 if args.model_prefix and (args.backend is None or local_rank == 0):
@@ -1091,9 +1158,12 @@ def _main(args):
                 if args.embedding_mode:
                     all_man_embed,all_tan_embed,all_labels = evaluate(
                         model, test_loader, dev, epoch=None, for_training=False, tb_helper=tb, args = args)
+                elif args.predict_part_embed:
+                    _ = evaluate(
+                        model, test_loader, dev, epoch=None, for_training=False, tb_helper=tb, args = args, name = name)
                 else:
                     test_metric, scores, labels, observers = evaluate(
-                        model, test_loader, dev, epoch=None, for_training=False, tb_helper=tb, args = args)
+                        model, test_loader, dev, epoch=None, for_training=False, tb_helper=tb, args = args, name = name)
                     _logger.info('Test metric %.5f' % test_metric, color='bold')
             del test_loader
 
@@ -1114,7 +1184,7 @@ def _main(args):
                     if args.embedding_mode:
                         output_path = base + '_' + 'embedding' + ext
                         save_root_embedding_space(args, output_path, data_config, all_man_embed, all_tan_embed, all_labels)
-                    else:
+                    elif not args.predict_part_embed:
                         save_root(args, output_path, data_config, scores, labels, observers)
                 else:
                     save_parquet(args, output_path, scores, labels, observers)

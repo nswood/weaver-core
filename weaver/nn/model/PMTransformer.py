@@ -679,6 +679,7 @@ class PMTransformer(nn.Module):
                  curvature_init = 1.2,
                  conv_embed = 'True',
                  clamp = -1,
+                 learnable = True, 
                  **kwargs) -> None:
         super().__init__(**kwargs)
         self.part_manifolds = nn.ModuleList()
@@ -689,7 +690,6 @@ class PMTransformer(nn.Module):
         self.conv_embed = conv_embed  =='True'
         self.clamp = clamp
         
-        
         embed_dims = [part_dim, part_dim, part_dim] #embed_dims=[128, 512, 128]
         fc_params = [[jet_dim,0.1], [jet_dim,0.1], [jet_dim,0.1]] #fc_params=[],
 
@@ -697,9 +697,9 @@ class PMTransformer(nn.Module):
             if m == 'R':
                 self.part_manifolds.append(geoopt.Euclidean())
             elif m == 'H':
-                self.part_manifolds.append(geoopt.PoincareBallExact(c=curvature_init, learnable=True))
+                self.part_manifolds.append(geoopt.PoincareBallExact(c=curvature_init, learnable=learnable))
             elif m == 'S':
-                self.part_manifolds.append(geoopt.SphereProjectionExact(k=curvature_init, learnable=True))
+                self.part_manifolds.append(geoopt.SphereProjectionExact(k=curvature_init, learnable=learnable))
         jets = jet_geom.split('x') if 'x' in jet_geom else [jet_geom]
         
         
@@ -707,9 +707,9 @@ class PMTransformer(nn.Module):
             if m == 'R':
                 self.jet_manifolds.append(geoopt.Euclidean())
             elif m == 'H':
-                self.jet_manifolds.append(geoopt.PoincareBallExact(c=curvature_init, learnable=True))
+                self.jet_manifolds.append(geoopt.PoincareBallExact(c=curvature_init, learnable=learnable))
             elif m == 'S':
-                self.jet_manifolds.append(geoopt.SphereProjectionExact(k=curvature_init, learnable=True))
+                self.jet_manifolds.append(geoopt.SphereProjectionExact(k=curvature_init, learnable=learnable))
 
         self.n_part_man = len(self.part_manifolds)
         self.n_jet_man = len(self.jet_manifolds)
@@ -766,7 +766,8 @@ class PMTransformer(nn.Module):
         _logger.info('cfg_cls_block: %s' % str(cfg_cls_block))
 
         self.pair_extra_dim = pair_extra_dim
-        self.embed = Embed(input_dim, embed_dims, activation=activation) if len(embed_dims) > 0 else nn.Identity()
+        if conv_embed:
+            self.embed = Embed(input_dim, embed_dims, activation=activation) if len(embed_dims) > 0 else nn.Identity()
         self.pair_embed = PairEmbed(
             pair_input_dim, pair_extra_dim, pair_embed_dims + [cfg_block['num_heads']],
             remove_self_pair=remove_self_pair, use_pre_activation_pair=use_pre_activation_pair,
