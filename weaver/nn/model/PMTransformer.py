@@ -12,6 +12,10 @@ from functools import partial
 
 from weaver.utils.logger import _logger
 
+import os
+os.environ['PYTHONPATH'] = '/n/home11/nswood/weaver-core/weaver/nn/model'
+
+from weaver.nn.model.PM_utils import *
 
 @torch.jit.script
 def delta_phi(a, b):
@@ -371,11 +375,7 @@ class PairEmbed(nn.Module):
             y = elements.view(-1, self.out_dim, seq_len, seq_len)
         return y
 
-# Import PM layers
-import os
-os.environ['PYTHONPATH'] = '/n/home11/nswood/weaver-core/weaver/nn/model'
 
-from weaver.nn.model.PM_utils import *
 
 def two_point_mid(x1,x2, man, w1,w2):
     if man.name == 'Euclidean':
@@ -410,6 +410,7 @@ class PMBlock(nn.Module):
                  base_resid_agg= False,
                  base_activations = 'act',
                  remove_pm_norm_layers=False):
+        
         super().__init__()
         
         self.manifolds = manifolds
@@ -481,7 +482,6 @@ class PMBlock(nn.Module):
                     self.w_man_att.append(Manifold_Linear(embed_dim, embed_dim ,ball = man))
                                               
             
-                
             if man.name == 'Euclidean':
                 self.pre_attn_norm.append(nn.LayerNorm(embed_dim))
                 self.pre_fc_norm.append(nn.LayerNorm(embed_dim))
@@ -526,8 +526,6 @@ class PMBlock(nn.Module):
                 x = self.attn[i](x_cls, u, u, key_padding_mask=padding_mask_cur)[0]  # (1, batch, embed_dim)
                 x = man.projx(x)
                 
-#                 if torch.isnan(x).any():
-#                     print(f"Nan post attention {i}")
                 
             else:
                 residual = x
@@ -540,8 +538,6 @@ class PMBlock(nn.Module):
                               attn_mask=attn_mask)[0]  # (seq_len, batch, embed_dim)
                 x = man.projx(x)
                 
-#                 if torch.isnan(x).any():
-#                     print(f"Nan post attention {i}")
             
             if man.name == 'Euclidean':
                 x = x + residual
@@ -558,11 +554,8 @@ class PMBlock(nn.Module):
             elif not self.remove_pm_norm_layers:
                 x = man.expmap0(self.pre_fc_norm[i](man.logmap0(x)))
             
-#             if torch.isnan(x).any():
-#                 print(f"Nan post fc norm {i}")
             x = man.projx(x)
             x = self.fc1[i](x)
-#             x = man.expmap0(self.act_dropout(man.logmap0(x)))
             x = self.act_dropout(x)
             x = man.projx(x)
             x = self.fc2[i](x)
@@ -689,8 +682,8 @@ class PMTransformer(nn.Module):
         self.conv_embed = conv_embed  =='True'
         self.clamp = clamp
         
-        embed_dims = [part_dim, part_dim, part_dim] #embed_dims=[128, 512, 128]
-        fc_params = [[jet_dim,0.1], [jet_dim,0.1], [jet_dim,0.1]] #fc_params=[],
+        embed_dims = [part_dim, part_dim, part_dim]
+        fc_params = [[jet_dim,0.1], [jet_dim,0.1], [jet_dim,0.1]]
 
         for i, m in enumerate(parts):
             if m == 'R':
@@ -777,12 +770,15 @@ class PMTransformer(nn.Module):
             self.part_embedding.append(nn.Sequential(Manifold_Linear(input_dim, part_dim, ball = man,weight_init_ratio = PM_weight_initialization_factor)))
         self.blocks = nn.ModuleList()
         for i in range(num_layers):
+            
             # if inter_man_att is greater than 0, set man_att based on layers
             if inter_man_att > 0:
                 cfg_block['man_att'] = (i != 0 and i % inter_man_att == 0)
+
             # if inter_man_att is 0, apply man_att to all hidden layers (i.e., layers except the first and last)
             elif inter_man_att == 0:
                 cfg_block['man_att'] = (i in range(1, num_layers - 1))
+
             # if inter_man_att is negative, man_att is False for all layers
             else: 
                 cfg_block['man_att'] = False
@@ -797,10 +793,12 @@ class PMTransformer(nn.Module):
             self.jet_fc = nn.ModuleList()
             self.jet_man_fc  = nn.ModuleList()
             if self.n_jet_man > 1:
-                self.midpoint_weighting = nn.Sequential(nn.Linear(self.n_jet_man*jet_dim, int(4*self.n_jet_man)),
-                                                            nn.ReLU(),
-                                                            nn.Linear(int(4*self.n_jet_man), self.n_jet_man),
-                                                            nn.Softmax(dim = -1))
+                self.midpoint_weighting = nn.Sequential(
+                        nn.Linear(self.n_jet_man*jet_dim, int(4*self.n_jet_man)),
+                        nn.ReLU(),
+                        nn.Linear(int(4*self.n_jet_man), self.n_jet_man),
+                        nn.Softmax(dim = -1))
+                
                 self.w_man_att_jet = nn.ModuleList()
             for man in self.jet_manifolds:
                 if self.base_activations == 'act' or man.name == 'Euclidean':
@@ -811,9 +809,12 @@ class PMTransformer(nn.Module):
                     act = None
                 fcs = []
                 in_dim = total_part_dim
-                self.jet_fc.append(nn.Sequential(nn.Linear(in_dim, in_dim + int(dim_dif*0.5)), nn.ReLU(),
-                                                 nn.Linear(in_dim + int(dim_dif*0.5), in_dim + int(dim_dif*0.75)), nn.ReLU(),
-                                                 nn.Linear(in_dim + int(dim_dif*0.75), jet_dim), nn.ReLU()))
+                self.jet_fc.append(nn.Sequential(
+                            nn.Linear(in_dim, in_dim + int(dim_dif*0.5)), nn.ReLU(),
+                            nn.Linear(in_dim + int(dim_dif*0.5), in_dim + int(dim_dif*0.75)),
+                            nn.ReLU(),
+                            nn.Linear(in_dim + int(dim_dif*0.75), jet_dim),
+                            nn.ReLU()))
                 
                 if act is not None :
                     self.jet_man_fc.append(nn.Sequential(
@@ -867,8 +868,6 @@ class PMTransformer(nn.Module):
             x, v, mask, uu = self.trimmer(x, v, mask, uu)
             padding_mask = ~mask.squeeze(1)  # (N, P)
         with torch.cuda.amp.autocast(enabled=self.use_amp):
-            # input embedding
-            # Remove extreme preprocessing
             if self.conv_embed:
                 x = self.embed(x).masked_fill(~mask.permute(2, 0, 1), 0)  # (P, N, C)
             x =x.permute(2,0, 1)
@@ -885,13 +884,7 @@ class PMTransformer(nn.Module):
                     x = torch.clamp(self.clamp/x.norm(dim=1), max = 1)*x
                 x_parts.append(self.part_embedding[i](man.expmap0(x)))
                 cls_tokens_parts.append(cls_tokens)
-            # extract class token
-              # (1, N, C)
-            
-            
-#             for idx, tensor in enumerate(x_parts):
-#                 if torch.isnan(tensor).any():
-#                     print(f"Nan post part_embedding at index {idx}")
+           
 
             
             del cls_tokens
@@ -901,16 +894,9 @@ class PMTransformer(nn.Module):
             for block in self.blocks:
                 x_parts = block(x_parts, pm_x_cls=None, padding_mask=padding_mask, attn_mask=attn_mask)
                 
-#             for idx, tensor in enumerate(x_parts):
-#                 if torch.isnan(tensor).any():
-#                     print(f"Nan post block at index {idx}")
-                
             for block in self.cls_blocks:
                 cls_tokens_parts = block(x_parts, pm_x_cls=cls_tokens_parts, padding_mask=padding_mask)
             
-#             for idx, tensor in enumerate(cls_tokens_parts):
-#                 if torch.isnan(tensor).any():
-#                     print(f"Nan post cls block at index {idx}")
             
             cls_tokens_parts = [man.logmap0(cls_tokens_parts[i]) for i,man in enumerate(self.part_manifolds)]
             
@@ -922,9 +908,6 @@ class PMTransformer(nn.Module):
             del cls_tokens_parts
             
                 
-#             for idx, tensor in enumerate(x_cls):
-#                 if torch.isnan(tensor).any():
-#                     print(f"Nan post cls log at index {idx}")
             
             # fc
             if self.jet_fc is None:
@@ -948,9 +931,6 @@ class PMTransformer(nn.Module):
             
             x_jets = [self.jet_man_fc[i](x_jets[i]) for i in range(self.n_jet_man)]
             
-#             for idx, tensor in enumerate(x_jets):
-#                 if torch.isnan(tensor).any():
-#                     print(f"Nan post jet_man_fc at index {idx}")
             
             if self.n_jet_man > 1:
                 
@@ -999,9 +979,6 @@ class PMTransformer(nn.Module):
             
             x_jets_tan = [man.logmap0(proc_jets[i]) for i,man in enumerate(self.jet_manifolds)]
             
-#             for idx, tensor in enumerate(x_jets_tan):
-#                 if torch.isnan(tensor).any():
-#                     print(f"Nan post jet log at index {idx}")
                     
             if embed:
                 proc_jets = [torch.squeeze(a,0) for a in proc_jets]
