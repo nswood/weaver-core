@@ -390,7 +390,7 @@ def two_point_mid(x1,x2, man, w1,w2):
 
 
 
-class PMExpert(nn.Module):
+class PM_Attention_Expert(nn.Module):
     def __init__(self,
                  man, 
                  embed_dim=128, 
@@ -515,7 +515,7 @@ class PMExpert(nn.Module):
         return x
 
 
-class PM_MoE_Block(nn.Module):
+class PM_MoE_Att_Block(nn.Module):
     def __init__(self,
                  man, 
                  top_k_part = 2,
@@ -538,13 +538,14 @@ class PM_MoE_Block(nn.Module):
                  base_resid_agg= False,
                  base_activations = 'act',
                  remove_pm_norm_layers=False):
-        super(PM_MoE_Block, self).__init__()
+        super(PM_MoE_Att_Block, self).__init__()
         self.part_experts = nn.ModuleList([
-            PMExpert(manifold, embed_dim, num_heads, ffn_ratio, dropout, attn_dropout, activation_dropout,
+            PM_Attention_Expert(manifold, embed_dim, num_heads, ffn_ratio, dropout, attn_dropout, activation_dropout,
                      add_bias_kv, activation, scale_fc, scale_attn, scale_heads, scale_resids, man_att,
                      weight_init_ratio, att_metric, inter_man_att_method, base_resid_agg, base_activations,
                      remove_pm_norm_layers)
                     for manifold in part_manifolds])
+
     def forward(self, features, expert_indices, x_cls = None):
         # Initialize a list to store the outputs for each sample
         outputs = [[] for _ in range(features.size(0))]
@@ -584,8 +585,55 @@ class PM_MoE_Block(nn.Module):
         # Now outputs contain the aggregated outputs for each sample
         return outputs
 
-  
-    
+
+class PM_MLP_Expert(nn.Module):
+    def __init__(self, input_dim, output_dim,man, activation='relu'):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(input_dim, input_dim + int((output_dim - input_dim) * 0.5)), nn.ReLU(),
+            nn.Linear(input_dim + int((output_dim - input_dim) * 0.5), input_dim + int((output_dim - input_dim) * 0.75)), nn.ReLU(),
+            nn.Linear(input_dim + int((output_dim - input_dim) * 0.75), output_dim), nn.ReLU()
+        )
+        self.man = man
+        self.man_fc = nn.Sequential(
+                Manifold_Linear(output_dim, output_dim, ball=man), 
+                nn.ReLU(),
+                Manifold_Linear(output_dim, output_dim, ball=man)
+            )
+
+    def forward(self, x):
+        x = self.fc(x)
+        return self.man_fc(self.man.expmap0(x))
+        
+
+class PM_MoE_MLP_Block(nn.Module):
+    def __init__(self, input_dim, output_dim, num_experts, top_k, manifolds, activation='relu'):
+        super().__init__()
+        self.experts = nn.ModuleList([PM_MLP_Expert(input_dim, output_dim, manifolds[i], activation) for i in range(num_experts)])
+        self.top_k = top_k
+
+    def forward(self, x, selected_experts):
+        outputs = [[] for _ in range(len(x))]
+        
+        for expert_idx, expert in enumerate(self.experts):
+            batch_elements = []
+            batch_indices = []
+            
+            for i in range(len(x)):
+                if expert_idx in selected_experts[i]:
+                    batch_elements.append(x[i].unsqueeze(0))
+                    batch_indices.append(i)
+            
+            if batch_elements:
+                batch_elements = torch.cat(batch_elements, dim=0)
+                expert_outputs = expert(batch_elements)
+                
+                for idx, output in zip(batch_indices, expert_outputs):
+                    outputs[idx].append(output)
+        
+        return [torch.cat(output, dim=0) for output in outputs]
+
+
 class MoG(nn.Module):
 
     def __init__(self,
@@ -734,6 +782,7 @@ class MoG(nn.Module):
 
         if conv_embed:
             self.embed = Embed(input_dim, embed_dims, activation=activation) if len(embed_dims) > 0 else nn.Identity()
+        
         self.pair_embed = PairEmbed(
             pair_input_dim, pair_extra_dim, pair_embed_dims + [cfg_block['num_heads']],
             remove_self_pair=remove_self_pair, use_pre_activation_pair=use_pre_activation_pair,
@@ -748,62 +797,27 @@ class MoG(nn.Module):
             
             cfg_block['man_att'] = False
 
-            self.blocks.append(PMBlock(**cfg_block))
+            self.blocks.append(PM_MoE_Att_Block(**cfg_block))
             
-        self.cls_blocks = nn.ModuleList([PMBlock(**cfg_cls_block) for _ in range(num_cls_layers)])
+        self.cls_blocks = nn.ModuleList([PM_MoE_Att_Block(**cfg_cls_block) for _ in range(num_cls_layers)])
         
-        
-        if fc_params is not None:
-            self.jet_fc = nn.ModuleList()
-            self.jet_man_fc  = nn.ModuleList()
-           
-            for i, man in enumerate(self.jet_manifolds):
-                if shared_expert and i == 0:
-                    jet_dim = jet_experts_dim*shared_expert_ratio
-                else:
-                    jet_dim = jet_experts_dim
-                
-                dim_dif = jet_dim - total_part_dim
 
-                if self.base_activations == 'act':
-                    act = nn.ReLU()
-                    
-                elif self.base_activations == 'mob_act':
-                    act = Mob_Act(nn.ReLU(), man)
-
-                elif self.base_activations == 'None':
-                    act = None
-                
-                fcs = []
-                in_dim = total_part_dim
-                self.jet_fc.append(nn.Sequential(
-                            nn.Linear(in_dim, in_dim + int(dim_dif*0.5)), nn.ReLU(),
-                            nn.Linear(in_dim + int(dim_dif*0.5), in_dim + int(dim_dif*0.75)),
-                            nn.ReLU(),
-                            nn.Linear(in_dim + int(dim_dif*0.75), jet_dim),
-                            nn.ReLU()))
-                
-                if act is not None :
-                    self.jet_man_fc.append(nn.Sequential(
-                        Manifold_Linear(jet_dim, jet_dim, ball=man, weight_init_ratio=PM_weight_initialization_factor), 
-                        act,
-                        Manifold_Linear(jet_dim, jet_dim, ball=man, weight_init_ratio=PM_weight_initialization_factor)
-                    ))
-                else:
-                    self.jet_man_fc.append(nn.Sequential(
-                        Manifold_Linear(jet_dim, jet_dim, ball=man, weight_init_ratio=PM_weight_initialization_factor),
-                        Manifold_Linear(jet_dim, jet_dim, ball=man, weight_init_ratio=PM_weight_initialization_factor)
-                    ))
-                
-                
-            post_jet_dim = self.n_jet_man * jet_dim
-            self.final_fc = nn.Sequential(nn.Linear(post_jet_dim, post_jet_dim), nn.ReLU(),
-                                          nn.Linear(post_jet_dim, post_jet_dim), nn.ReLU(),
-                                          nn.Linear(post_jet_dim, num_classes))
-            
+        # Update correct dims here
+        if shared_expert and i == 0:
+            jet_dim = jet_experts_dim*shared_expert_ratio
         else:
-            self.jet_fc = None
+            jet_dim = jet_experts_dim
+        dim_dif = jet_dim - total_part_dim
 
+        # Initialize PM_MoE_MLP_Block for jet_fc
+        self.jet_experts = PM_MoE_MLP_Block(input_dim=total_part_dim, output_dim=jet_dim, num_experts=jet_experts, top_k=self.top_k_jet)
+            
+        post_jet_dim = self.n_jet_man * jet_dim
+
+        self.final_fc = nn.Sequential(nn.Linear(post_jet_dim, post_jet_dim), nn.ReLU(),
+                                        nn.Linear(post_jet_dim, post_jet_dim), nn.ReLU(),
+                                        nn.Linear(post_jet_dim, num_classes))
+        
         # init
         self.cls_token = nn.ParameterList()
         for man in self.part_manifolds:
@@ -861,7 +875,7 @@ class MoG(nn.Module):
                 x_parts = block(x_parts, pm_x_cls=None, padding_mask=padding_mask, attn_mask=attn_mask)
                 
             for block in self.cls_blocks:
-                cls_tokens_parts = block(x_parts, pm_x_cls=cls_tokens_parts, padding_mask=padding_mask)
+                cls_tokens_parts = block(x_parts, x_cls=cls_tokens_parts, padding_mask=padding_mask)
             
             
             cls_tokens_parts = [man.logmap0(cls_tokens_parts[i]) for i,man in enumerate(self.part_manifolds)]
@@ -872,76 +886,30 @@ class MoG(nn.Module):
             else:
                 x_cls = cls_tokens_parts[0]
             del cls_tokens_parts
-            
-                
-            
+             
             # fc
             if self.jet_fc is None:
                 return x_cls
             
-            x_jets = [x_cls for man in self.jet_manifolds]
+            router_output = self.jet_router(x_cls)
+
+            selected_jet_experts = torch.topk(router_output, self.top_k_jet, dim=-1).indices
             
-            # Map to correct Jet dim in Euclidean space
-            x_jets = [self.jet_fc[i](x_jets[i]) for i in range(self.n_jet_man)]
-            
-            # Clamp
-            if self.clamp > 1:
-                for i,man in enumerate(self.jet_manifolds):
-                    if 'Poincare' in man.name:
-                        print('jet clamp')
-                        x_jets[i] = torch.clamp(self.clamp/x_jets[i].norm(dim=1), max = 1)*x_jets[i]
-            
+            # If shared expert, always route to index 0 and select remaining experts from 1 to n
+            if self.shared_expert:
+                selected_part_experts = torch.cat((torch.zeros_like(selected_part_experts[:,0]).unsqueeze(-1),selected_jet_experts+1),dim=-1)
+
+            # Map to correct Jet dim in Euclidean space using MoE
+            x_jets = self.jet_fc[0](x_cls, selected_jet_experts)
+
             # Map to Jet Manifold
             x_jets = [man.expmap0(x_jets[i]) for i, man in enumerate(self.jet_manifolds)]
-            del x_cls
-            
+
+            # Map to final Jet Manifold using MoE
             x_jets = [self.jet_man_fc[i](x_jets[i]) for i in range(self.n_jet_man)]
             
-            
-            if self.n_jet_man > 1:
-                
-                tan_output = [self.jet_manifolds[i].logmap0(x_jets[i]) for i in range(self.n_jet_man)]
-                
-                mu_stacked = torch.stack(tan_output)
-                
-                # Learnable weights between manifolds
-                weights = self.midpoint_weighting(mu_stacked.reshape(1, mu_stacked.shape[1], mu_stacked.shape[2], mu_stacked.shape[-1] * mu_stacked.shape[0]))
-                
-                _, _, dim_2, dim_3 = mu_stacked.shape
-
-                # Update the weights permutation and expansion dynamically
-                weights = weights.permute(3, 1, 2, 0)
-
-                # Dynamically expand based on the shapes of the vector
-                weights = weights.expand(-1, -1, dim_2, dim_3)
-                
-                # Weighted midpoint
-                mu = torch.sum(weights * mu_stacked, dim=0, keepdim=True) # Weights normalized, no denom needed / torch.sum(weights, dim=0, keepdim=True)
-                mu = mu.squeeze(0)
-                
-                # Project midpoints and process 
-                proj_mu = [self.w_man_att_jet[i](self.jet_manifolds[i].expmap0(mu)) for i in range(self.n_jet_man)]
-                                
-                
-                # distance between x_i and mu projected onto M_i
-                d_i = []
-                for i in range(self.n_jet_man):
-                    if self.jet_manifolds[i].name =='Euclidean':
-                        d_i.append(torch.norm(x_jets[i]-proj_mu[i],dim=-1))
-                    else:
-                        d_i.append(self.jet_manifolds[i].dist(x_jets[i],proj_mu[i]))
-                
-                d_i_tensor = torch.stack(d_i, dim=0)  # Shape: (self.n_jet_man, ...)
-                
-                # Apply softmax over the manifold dimension (dim=0)
-                softmax_d_i = torch.softmax(d_i_tensor, dim=0)
-
-                proc_jets = []
-                for i in range(self.n_jet_man):
-                    proc_jets.append(two_point_mid(x_jets[i],proj_mu[i], self.jet_manifolds[i],torch.ones(softmax_d_i[i].shape).to(softmax_d_i[i].device).unsqueeze(-1), softmax_d_i[i].unsqueeze(-1)))
-                
-            else:       
-                proc_jets = x_jets
+            del x_cls
+            proc_jets = x_jets
             
             x_jets_tan = [man.logmap0(proc_jets[i]) for i,man in enumerate(self.jet_manifolds)]
             
