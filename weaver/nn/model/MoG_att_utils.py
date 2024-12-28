@@ -61,8 +61,9 @@ class PM_Attention_Expert(nn.Module):
             
     def forward(self, x, x_cls = None, padding_mask=None, attn_mask=None):
         
-       
+        print('x shape', x.shape)
         if x_cls is not None:
+            print('x_cls shape', x_cls.shape)
             
             with torch.no_grad():
                 # prepend one element for x_cls: -> (batch, 1+seq_len)
@@ -71,6 +72,7 @@ class PM_Attention_Expert(nn.Module):
             # class attention: https://arxiv.org/pdf/2103.17239.pdf
             residual = x_cls
             u = torch.cat((x_cls, x), dim=0)  # (seq_len+1, batch, embed_dim)
+            print('u shape', u.shape)
             
             u = self.man.expmap0(self.pre_attn_norm(self.man.logmap0(u)))
             
@@ -104,7 +106,7 @@ class PM_Attention_Expert(nn.Module):
         x = self.man.mobius_add(x,residual)
         x = self.man.projx(x)
         
-    
+        print('Expert output shape', x.shape)
         return x
 
 
@@ -154,7 +156,7 @@ class PM_MoE_Att_Block(nn.Module):
                     j = (expert_indices[i] == expert_idx).nonzero(as_tuple=True)[0].item()
                     batch_elements.append(features[i][j].unsqueeze(0))
                     if x_cls is not None:
-                        batch_x_cls.append(x_cls[i][j].unsqueeze(0))
+                        batch_x_cls.append(x_cls[i][j])
                     batch_indices.append(i)
             
             if batch_elements:
@@ -164,17 +166,23 @@ class PM_MoE_Att_Block(nn.Module):
                 batch_elements = torch.cat(batch_elements, dim=0)
                 print('post cat batch_elements', batch_elements.shape)
                 if x_cls is not None:
+                    print('batch_x_cls before cat', batch_x_cls[0].shape)
                     batch_x_cls = torch.cat(batch_x_cls, dim=0)
+                    print('batch_x_cls', batch_x_cls.shape)
                 batch_elements = batch_elements.permute(1, 0, 2)
                 print('permuted batch_elements', batch_elements.shape)
                 # Pass the batch through the expert
                 if x_cls is not None:
-                    expert_outputs = expert(batch_elements, batch_x_cls, padding_mask=padding_mask, attn_mask=attn_mask)
+                    expert_outputs = expert(batch_elements, x_cls = batch_x_cls, padding_mask=padding_mask, attn_mask=attn_mask)
                 else:
                     expert_outputs = expert(batch_elements, padding_mask=padding_mask, attn_mask=attn_mask)
+                expert_outputs = expert_outputs.permute(1, 0, 2)
                 
                 # Recombine the outputs
                 for idx, output in zip(batch_indices, expert_outputs):
+                    print('output shape', output.shape)
+                    if x_cls is not None:
+                        output = output.unsqueeze(1)
                     outputs[idx].append(output)
 
         # Now outputs contain the aggregated outputs for each sample

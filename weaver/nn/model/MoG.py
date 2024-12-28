@@ -88,11 +88,13 @@ class MoG(nn.Module):
 
         for i in range(part_experts):
             self.part_manifolds.append(geoopt.Stereographic(learnable=learnable))
-            total_part_dim += part_experts_dim
+        
+        total_part_dim += top_k_part*part_experts_dim
         
         for i in range(jet_experts):
             self.jet_manifolds.append(geoopt.Stereographic(learnable=learnable))
-            total_jet_dim += jet_experts_dim
+        
+        total_jet_dim += top_k_jet*jet_experts_dim
             
 
         self.top_k_part = top_k_part
@@ -305,31 +307,58 @@ class MoG(nn.Module):
             
             # transform
             for block in self.blocks:
+                print('Att block')
                 x_parts = block(x_parts,selected_part_experts, x_cls=None, padding_mask=padding_mask, attn_mask=attn_mask)
-                
+                print('Batch', len(x_parts))
+                print('Number of experts',len(x_parts[0]))
+                for i in range(len(x_parts[0])):
+                    print('Expert',i)
+                    print('Data shape',x_parts[0][i].shape)
+
+
+            print('Original cls tokens')
+            print('Batch', len(cls_tokens_parts))
+            print('Number of experts',len(cls_tokens_parts[0]))
+            for i in range(len(cls_tokens_parts[0])):
+                print('Expert',i)
+                print('Data shape',cls_tokens_parts[0][i].shape)
+
+
             for block in self.cls_blocks:
+                print('cls block')
                 cls_tokens_parts = block(x_parts,selected_part_experts, x_cls=cls_tokens_parts, padding_mask=padding_mask)
-            
+                print('Batch', len(cls_tokens_parts))
+                print('Number of experts',len(cls_tokens_parts[0]))
+                
+                for i in range(len(cls_tokens_parts[0])):
+                    print('Expert',i)
+                    print('Data shape',cls_tokens_parts[0][i].shape)
             # Map to tangent space from particle-representation space
+            
+
+            
             tan_cls_tokens_parts = []
             for i in range(len(cls_tokens_parts)):
                 cur = []
-                for j,k in enumerate(selected_jet_experts[i]):
+                for j,k in enumerate(selected_part_experts[i]):
                     cur.append(self.part_manifolds[k].logmap0(cls_tokens_parts[i][j]))
                 tan_cls_tokens_parts.append(cur)
                     
 
             # Concatenate particle man outputs
-            if self.n_part_man > 1:
-                x_cls = torch.cat(tan_cls_tokens_parts,dim=-1)
+            if self.top_k_part > 1:
+                x_cls = [torch.cat(a,dim=-1) for a in tan_cls_tokens_parts]
             else:
                 x_cls = tan_cls_tokens_parts[0]
-            del cls_tokens_parts
-             
-            # fc
-            if self.jet_fc is None:
-                return x_cls
             
+            print('Len x_cls',len(x_cls))
+            print('Len x_cls[0]',len(x_cls[0]))
+            print('x_cls[0][0]',x_cls[0][0].shape)
+            x_cls = torch.cat(x_cls,dim=0)
+            print('x_cls',x_cls.shape)
+            x_cls = x_cls.squeeze(1)
+            del cls_tokens_parts
+                
             router_output = self.jet_router(x_cls)
 
             selected_jet_experts = torch.topk(router_output, self.top_k_jet, dim=-1).indices
