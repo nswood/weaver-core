@@ -236,6 +236,7 @@ class MoG(nn.Module):
         return {'cls_token', }
 
     def forward(self, x, v=None, mask=None, uu=None, uu_idx=None, embed = False):
+        # N is batch size, P is particles, C is channels
         # x: (N, C, P)
         # v: (N, 4, P) [px,py,pz,energy]
         # mask: (N, 1, P) -- real particle = 1, padded = 0
@@ -253,16 +254,24 @@ class MoG(nn.Module):
             
             x = self.embed(x).masked_fill(~mask.permute(2, 0, 1), 0)  # (P, N, C)
             
+            # want x in (seq_len, batch, embed_dim)
+
             print(x.shape)
-            x =x.permute(1,0, 2)
-            print(x.shape)
+            # x =x.permute(2,0, 1)
+            # x =x.permute(1,0, 2)
+            
+            # print(x.shape)
             attn_mask = None
             if (v is not None or uu is not None) and self.pair_embed is not None:
                 attn_mask = self.pair_embed(v, uu).view(-1, v.size(-1), v.size(-1))  # (N*num_heads, P, P)
             
-            print(x[:,:self.part_router_n_parts].shape)
-            print(x[:,:self.part_router_n_parts].reshape(x.size(0),-1).shape)
-            router_output = self.part_router(x[:,:self.part_router_n_parts].reshape(x.size(0),-1))
+            print(x[:self.part_router_n_parts].shape)
+            
+            x_for_router = x[:self.part_router_n_parts]
+            
+            print(x_for_router[:self.part_router_n_parts].reshape(x_for_router.size(1),-1).shape)
+
+            router_output = self.part_router(x_for_router[:self.part_router_n_parts].reshape(x_for_router.size(1),-1))
             selected_part_experts = torch.topk(router_output, self.top_k_part, dim = -1).indices
             print(selected_part_experts[0:10])
             # If shared expert, always route to index 0 and select remaining experts from 1 to n
@@ -271,14 +280,19 @@ class MoG(nn.Module):
             print(selected_part_experts[0:10])
             
             # Map input onto selected particle manifolds
-            x_parts = [] # Batch x K x N x F
-            cls_tokens_parts = [] # Batch x K x F
-            for i in range(x.size(0)):
+            # x shape: (P, N, C)
+
+            x_parts = [] # N x K x P x F
+            cls_tokens_parts = [] # N x K x F
+            for i in range(x.size(1)):
                 cur_x = []
                 cur_token = []
                 for k in selected_part_experts[i]:
-                    cls_tokens = self.cls_token[i].expand(1, x.size(1), -1)
-                    cur_x.append(self.part_manifolds[k].expmap0(x[i]))
+                    print(x[:,i].shape)
+                    print(self.cls_token[k])
+                    cls_tokens = self.cls_token[k].expand(1, x.size(1), -1)
+                    print(cls_tokens.shape)
+                    cur_x.append(self.part_manifolds[k].expmap0(x[:,i]))
                     cur_token.append(cls_tokens)
                 x_parts.append(cur_x)
                 cls_tokens_parts.append(cur_token)
@@ -286,6 +300,8 @@ class MoG(nn.Module):
             
             del cls_tokens
             del x
+
+            print(len(x_parts))
             
             # transform
             for block in self.blocks:

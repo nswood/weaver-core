@@ -92,10 +92,7 @@ class PM_Attention_Expert(nn.Module):
         x = self.man.projx(x)
         
         residual = x
-        if self.man.name == 'Euclidean':
-            x = self.pre_fc_norm(x)
-        elif not self.remove_pm_norm_layers:
-            x = self.man.expmap0(self.pre_fc_norm(self.man.logmap0(x)))
+        x = self.man.expmap0(self.pre_fc_norm(self.man.logmap0(x)))
         
         x = self.man.projx(x)
         x = self.fc1(x)
@@ -138,7 +135,11 @@ class PM_MoE_Att_Block(nn.Module):
     def forward(self, features, expert_indices, x_cls = None, padding_mask=None, attn_mask=None):
         # Initialize a list to store the outputs for each sample
         batch = len(features)
+        print(batch)
         outputs = [[] for _ in range(batch)]
+        # features N x K x P x F
+        # expert_indices N x K
+        # x_cls  N x K x F
 
         # Iterate over each expert
         for expert_idx, expert in enumerate(self.part_experts):
@@ -158,10 +159,14 @@ class PM_MoE_Att_Block(nn.Module):
             
             if batch_elements:
                 # Stack the collected elements to form a batch
+                print('pre cat batch_elements', batch_elements[0].shape)
+
                 batch_elements = torch.cat(batch_elements, dim=0)
+                print('post cat batch_elements', batch_elements.shape)
                 if x_cls is not None:
                     batch_x_cls = torch.cat(batch_x_cls, dim=0)
-                
+                batch_elements = batch_elements.permute(1, 0, 2)
+                print('permuted batch_elements', batch_elements.shape)
                 # Pass the batch through the expert
                 if x_cls is not None:
                     expert_outputs = expert(batch_elements, batch_x_cls, padding_mask=padding_mask, attn_mask=attn_mask)
