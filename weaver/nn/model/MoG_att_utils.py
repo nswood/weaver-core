@@ -59,7 +59,7 @@ class PM_Attention_Expert(nn.Module):
         self.pre_attn_norm = nn.LayerNorm(embed_dim)
         self.pre_fc_norm = nn.LayerNorm(embed_dim)
             
-    def forward(self, x, x_cls, padding_mask=None, attn_mask=None):
+    def forward(self, x, x_cls = None, padding_mask=None, attn_mask=None):
         
        
         if x_cls is not None:
@@ -114,7 +114,6 @@ class PM_Attention_Expert(nn.Module):
 class PM_MoE_Att_Block(nn.Module):
     def __init__(self,
                  manifolds, 
-                 top_k_part = 2,
                  embed_dim=128, 
                  num_heads=8, 
                  ffn_ratio=4,
@@ -128,23 +127,18 @@ class PM_MoE_Att_Block(nn.Module):
                  scale_heads=False, 
                  scale_resids=True,
                  man_att = False,
-                 weight_init_ratio =1,
-                 att_metric = 'tan_space',
-                 inter_man_att_method = 'v3',
-                 base_resid_agg= False,
-                 base_activations = 'act',
-                 remove_pm_norm_layers=False):
+                 weight_init_ratio =1):
         super(PM_MoE_Att_Block, self).__init__()
         self.part_experts = nn.ModuleList([
             PM_Attention_Expert(manifold, embed_dim, num_heads, ffn_ratio, dropout, attn_dropout, activation_dropout,
                      add_bias_kv, activation, scale_fc, scale_attn, scale_heads, scale_resids, man_att,
-                     weight_init_ratio, att_metric, inter_man_att_method, base_resid_agg, base_activations,
-                     remove_pm_norm_layers)
+                     weight_init_ratio)
                     for manifold in manifolds])
 
-    def forward(self, features, expert_indices, x_cls = None):
+    def forward(self, features, expert_indices, x_cls = None, padding_mask=None, attn_mask=None):
         # Initialize a list to store the outputs for each sample
-        outputs = [[] for _ in range(features.size(0))]
+        batch = len(features)
+        outputs = [[] for _ in range(batch)]
 
         # Iterate over each expert
         for expert_idx, expert in enumerate(self.part_experts):
@@ -154,9 +148,9 @@ class PM_MoE_Att_Block(nn.Module):
             batch_x_cls = []
             batch_indices = []
             
-            for i in range(features.size(0)):
+            for i in range(batch):
                 if expert_idx in expert_indices[i]:
-                    j = expert_indices[i].index(expert_idx)
+                    j = (expert_indices[i] == expert_idx).nonzero(as_tuple=True)[0].item()
                     batch_elements.append(features[i][j].unsqueeze(0))
                     if x_cls is not None:
                         batch_x_cls.append(x_cls[i][j].unsqueeze(0))
@@ -170,9 +164,9 @@ class PM_MoE_Att_Block(nn.Module):
                 
                 # Pass the batch through the expert
                 if x_cls is not None:
-                    expert_outputs = expert(batch_elements, batch_x_cls)
+                    expert_outputs = expert(batch_elements, batch_x_cls, padding_mask=padding_mask, attn_mask=attn_mask)
                 else:
-                    expert_outputs = expert(batch_elements)
+                    expert_outputs = expert(batch_elements, padding_mask=padding_mask, attn_mask=attn_mask)
                 
                 # Recombine the outputs
                 for idx, output in zip(batch_indices, expert_outputs):

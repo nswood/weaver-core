@@ -667,12 +667,13 @@ def model_setup(args, data_config, device='cpu'):
     
 
     
-    filtered_args_dict = {k: args_dict[k] for k in ['part_geom', 'part_dim', 'jet_geom', 'jet_dim','equal_heads','PM_weight_initialization_factor','att_metric','inter_man_att','inter_man_att_method','base_resid_agg','base_activations','remove_pm_norm_layers'] if k in args_dict}
+    # filtered_args_dict = {k: args_dict[k] for k in ['part_geom', 'part_dim', 'jet_geom', 'jet_dim','equal_heads','PM_weight_initialization_factor','att_metric','inter_man_att','inter_man_att_method','base_resid_agg','base_activations','remove_pm_norm_layers'] if k in args_dict}
 
     # Merge dictionaries
-    combined_options = {**network_options, **filtered_args_dict}
+    # combined_options = {**network_options, **filtered_args_dict}
+    model, model_info = network_module.get_model(data_config, **network_options)
 
-    model, model_info = network_module.get_model(data_config, **combined_options)
+    # model, model_info = network_module.get_model(data_config, **combined_options)
     model = model.double() 
     if args.load_model_weights:
         model_state = torch.load(args.load_model_weights, map_location='cpu')
