@@ -365,7 +365,7 @@ class MoG(nn.Module):
             
             # If shared expert, always route to index 0 and select remaining experts from 1 to n
             if self.shared_expert:
-                selected_part_experts = torch.cat((torch.zeros_like(selected_part_experts[:,0]).unsqueeze(-1),selected_jet_experts+1),dim=-1)
+                selected_jet_experts = torch.cat((torch.zeros_like(selected_jet_experts[:,0]).unsqueeze(-1),selected_jet_experts+1),dim=-1)
 
             x_jets = [] # Batch x K x N x F
             for i in range(x_cls.size(0)):
@@ -378,22 +378,40 @@ class MoG(nn.Module):
             del x_cls
 
             proc_jets = self.jet_experts(x_jets, selected_jet_experts)
+            
+            print('Len proc_jets',len(proc_jets))
+            print('Len proc_jets[0]',len(proc_jets[0]))
+            print('proc_jets[0][0].shape',proc_jets[0][0].shape)
+            
+
+            
             del x_jets
+            proc_jets = [torch.tensor(a).to(a[0].device) for a in proc_jets]
             
-            x_jets_tan = [man.logmap0(proc_jets[i]) for i,man in enumerate(self.jet_manifolds)]
-            
+            x_jets_tan = [] # Batch x K x N x F
+            for i in range(len(proc_jets)):
+                cur_x = []
+                
+                for k in selected_jet_experts[i]:
+                    cur_x.append(self.jet_manifolds[k].logmap0(proc_jets[i]))
+                    
+                x_jets_tan.append(cur_x)
+
                     
             if embed:
                 proc_jets = [torch.squeeze(a,0) for a in proc_jets]
                 x_jets_tan = [torch.squeeze(a,0) for a in x_jets_tan]
                 
                 return proc_jets, x_jets_tan,list(self.jet_manifolds),selected_jet_experts
-            del x_jets
             
-            if self.n_jet_man > 1:
-                x_out = torch.cat(x_jets_tan,dim=-1)
+            
+            if self.top_k_jet > 1:
+                x_out = [torch.cat(a,dim=-1) for a in x_jets_tan]
             else:
-                x_out = x_jets_tan[0]
+                x_out = [a[0] for a in x_jets_tan]
+            x_out = torch.cat(x_out,dim=0)
+
+            print('x_out',x_out.shape)
             
             # Regular LayerNorm    
             x_out = self.norm(x_out).squeeze(0)
