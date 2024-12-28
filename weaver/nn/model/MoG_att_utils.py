@@ -30,12 +30,7 @@ class PM_Attention_Expert(nn.Module):
                  scale_heads=False, 
                  scale_resids=True,
                  man_att = False,
-                 weight_init_ratio =1,
-                 att_metric = 'tan_space',
-                 inter_man_att_method = 'v3',
-                 base_resid_agg= False,
-                 base_activations = 'act',
-                 remove_pm_norm_layers=False):
+                 weight_init_ratio =1):
         
         super().__init__()
         
@@ -47,32 +42,19 @@ class PM_Attention_Expert(nn.Module):
         self.head_dim = embed_dim // num_heads
         self.ffn_dim = embed_dim * ffn_ratio
         
-        self.inter_man_att_method = inter_man_att_method
-        self.base_resid_agg = base_resid_agg
-        self.base_activations = base_activations
-        self.remove_pm_norm_layers = remove_pm_norm_layers
     
         self.dropout = nn.Dropout(dropout)
         self.act = nn.ReLU()
         self.act_dropout = nn.Dropout(activation_dropout)
         
                                   
-        if self.base_activations == 'act' or self.man.name == 'Euclidean':
-            act = nn.ReLU()
-        elif self.base_activations == 'mob_act':
-            act = Mob_Act(nn.ReLU(), self.man)
-        elif self.base_activations == 'None':
-            act = None
-        
-        self.res_agg.append(Mob_Res_Midpoint(self.man))
-        
+        act = Mob_Act(nn.ReLU(), self.man)
         if act is not None:
             self.fc1 = nn.Sequential(Manifold_Linear(embed_dim, self.ffn_dim,ball = self.man, weight_init_ratio = weight_init_ratio), act)
             self.fc2 = nn.Sequential(Manifold_Linear(self.ffn_dim, embed_dim,ball = self.man, weight_init_ratio = weight_init_ratio), act)
 
 
-        self.attn = ManifoldMHA(embed_dim,num_heads,dropout=attn_dropout, ball = self.man, weight_init_ratio = weight_init_ratio,att_metric = att_metric)                                   
-        
+        self.attn = ManifoldMHA(embed_dim,num_heads,dropout=attn_dropout, ball = self.man, weight_init_ratio = weight_init_ratio,att_metric = 'tan_space')                                   
         
         self.pre_attn_norm = nn.LayerNorm(embed_dim)
         self.pre_fc_norm = nn.LayerNorm(embed_dim)
@@ -89,10 +71,8 @@ class PM_Attention_Expert(nn.Module):
             # class attention: https://arxiv.org/pdf/2103.17239.pdf
             residual = x_cls
             u = torch.cat((x_cls, x), dim=0)  # (seq_len+1, batch, embed_dim)
-            if self.man.name == 'Euclidean':
-                u = self.pre_attn_norm(u)
-            elif not self.remove_pm_norm_layers:
-                u = self.man.expmap0(self.pre_attn_norm(self.man.logmap0(u)))
+            
+            u = self.man.expmap0(self.pre_attn_norm(self.man.logmap0(u)))
             
             x = self.attn(x_cls, u, u, key_padding_mask=padding_mask_cur)[0]  # (1, batch, embed_dim)
             x = self.man.projx(x)
@@ -100,22 +80,14 @@ class PM_Attention_Expert(nn.Module):
                 
         else:
             residual = x
-            if self.man.name == 'Euclidean':
-                x = self.pre_attn_norm(x)
-            elif not self.remove_pm_norm_layers:
-                x = self.man.expmap0(self.pre_attn_norm(self.man.logmap0(x)))
-            
+            x = self.man.expmap0(self.pre_attn_norm(self.man.logmap0(x)))
             x = self.attn(x, x, x, key_padding_mask=padding_mask,
                             attn_mask=attn_mask)[0]  # (seq_len, batch, embed_dim)
             x = self.man.projx(x)
                 
         
-        if self.man.name == 'Euclidean':
-            x = x + residual
-        elif self.base_resid_agg:
-            x = self.man.mobius_add(x,residual)
-        else:
-            x = self.res_agg(x,residual)
+        # Residual Aggregation
+        x = self.man.mobius_add(x,residual)
         
         x = self.man.projx(x)
         
@@ -130,9 +102,9 @@ class PM_Attention_Expert(nn.Module):
         x = self.act_dropout(x)
         x = self.man.projx(x)
         x = self.fc2(x)
-            
-        x = self.man.mobius_add(x,residual)
         
+        # Residual Aggregation
+        x = self.man.mobius_add(x,residual)
         x = self.man.projx(x)
         
     
@@ -141,7 +113,7 @@ class PM_Attention_Expert(nn.Module):
 
 class PM_MoE_Att_Block(nn.Module):
     def __init__(self,
-                 man, 
+                 manifolds, 
                  top_k_part = 2,
                  embed_dim=128, 
                  num_heads=8, 
@@ -168,7 +140,7 @@ class PM_MoE_Att_Block(nn.Module):
                      add_bias_kv, activation, scale_fc, scale_attn, scale_heads, scale_resids, man_att,
                      weight_init_ratio, att_metric, inter_man_att_method, base_resid_agg, base_activations,
                      remove_pm_norm_layers)
-                    for manifold in part_manifolds])
+                    for manifold in manifolds])
 
     def forward(self, features, expert_indices, x_cls = None):
         # Initialize a list to store the outputs for each sample

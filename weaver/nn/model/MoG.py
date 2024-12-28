@@ -52,8 +52,8 @@ class MoG(nn.Module):
                  top_k_jet = 2,
                  shared_expert = True, 
                  shared_expert_ratio = 1,
-                 num_heads=8,
-                 num_layers=8,
+                 num_heads=4,
+                 num_layers=4,
                  num_cls_layers=2,
                  block_params=None,
                  cls_block_params={'dropout': 0, 'attn_dropout': 0, 'activation_dropout': 0},
@@ -64,17 +64,8 @@ class MoG(nn.Module):
                  for_inference=False,
                  use_amp=False,
                  PM_weight_initialization_factor = 1, 
-                 att_metric = 'tanspace', 
-                 inter_man_att_method = 'v3',
                  inter_man_att = -1,
-                 equal_heads = False,
-                 base_resid_agg= False,
-                 base_activations = 'act',
-                 remove_pm_norm_layers=False,
                  dropout_rate = 0.1,
-                 curvature_init = 1.2,
-                 conv_embed = 'True',
-                 clamp = -1,
                  learnable = True, 
                  **kwargs) -> None:
         super().__init__(**kwargs)
@@ -92,8 +83,6 @@ class MoG(nn.Module):
 
         embed_dims = [64, 64, part_experts_dim]
         fc_params = [[jet_experts_dim,0.1], [jet_experts_dim,0.1], [jet_experts_dim,0.1]]
-
-        self.conv_embed = conv_embed  =='True'
 
         for i in part_experts:
             self.part_manifolds.append(geoopt.Stereographic(learnable=learnable))
@@ -134,14 +123,7 @@ class MoG(nn.Module):
         self.for_inference = for_inference
         self.use_amp = use_amp
         
-        self.base_resid_agg = base_resid_agg
-        self.base_activations = base_activations
-        self.remove_pm_norm_layers = remove_pm_norm_layers
-
         embed_dim = part_dim
-    
-        if equal_heads and self.n_part_man > 1: 
-            num_heads = int(num_heads/self.n_part_man)
             
         default_cfg = dict(embed_dim=embed_dim, 
                            num_heads=num_heads, 
@@ -156,14 +138,8 @@ class MoG(nn.Module):
                            scale_heads=False, 
                            scale_resids=True, 
                            weight_init_ratio = PM_weight_initialization_factor,
-                           att_metric =att_metric,
                            manifolds = self.part_manifolds,
-                           man_att = False,
-                           inter_man_att_method = inter_man_att_method,
-                           base_resid_agg = base_resid_agg,
-                           base_activations = base_activations,
-                           remove_pm_norm_layers = remove_pm_norm_layers)
-        
+                           man_att = False)        
         cfg_block = copy.deepcopy(default_cfg)
         
         if block_params is not None:
@@ -205,12 +181,16 @@ class MoG(nn.Module):
             jet_dim = jet_experts_dim*shared_expert_ratio
         else:
             jet_dim = jet_experts_dim
-        dim_dif = jet_dim - total_part_dim
+            
 
         # Initialize PM_MoE_MLP_Block for jet_fc
-        self.jet_experts = PM_MoE_MLP_Block(input_dim=total_part_dim, output_dim=jet_dim, num_experts=jet_experts, top_k=self.top_k_jet)
+        self.jet_experts = PM_MoE_MLP_Block(input_dim=total_part_dim, 
+                                            output_dim=jet_dim, 
+                                            num_experts=jet_experts, 
+                                            top_k=self.top_k_jet, 
+                                            shared_expert_ratio=shared_expert_ratio)
             
-        post_jet_dim = self.n_jet_man * jet_dim
+        post_jet_dim = top_k_jet * jet_dim
 
         self.final_fc = nn.Sequential(nn.Linear(post_jet_dim, post_jet_dim), nn.ReLU(),
                                         nn.Linear(post_jet_dim, post_jet_dim), nn.ReLU(),
@@ -244,8 +224,8 @@ class MoG(nn.Module):
             x, v, mask, uu = self.trimmer(x, v, mask, uu)
             padding_mask = ~mask.squeeze(1)  # (N, P)
         with torch.cuda.amp.autocast(enabled=self.use_amp):
-            if self.conv_embed:
-                x = self.embed(x).masked_fill(~mask.permute(2, 0, 1), 0)  # (P, N, C)
+            
+            x = self.embed(x).masked_fill(~mask.permute(2, 0, 1), 0)  # (P, N, C)
             x =x.permute(2,0, 1)
             attn_mask = None
             if (v is not None or uu is not None) and self.pair_embed is not None:
@@ -258,13 +238,20 @@ class MoG(nn.Module):
             if self.shared_expert:
                 selected_part_experts = torch.cat((torch.zeros_like(selected_part_experts[:,0]).unsqueeze(-1),selected_part_experts+1),dim=-1)
             
-            x_parts = []
-            cls_tokens_parts = []
-            for i in self.n_part_experts:
-                cls_tokens = self.cls_token[i].expand(1, x.size(1), -1)
-                x_parts.append(self.part_embedding[i](man.expmap0(x)))
-                cls_tokens_parts.append(cls_tokens)
-           
+            
+            # Map input onto selected particle manifolds
+            x_parts = [] # Batch x K x N x F
+            cls_tokens_parts = [] # Batch x K x F
+            for i in range(x.size(0)):
+                cur_x = []
+                cur_token = []
+                for k in selected_part_experts[i]:
+                    cur_x.append(self.part_manifolds[k].expmap0(x[i]))
+                    cur_token.append(cls_tokens[i])
+                x_parts.append(cur_x)
+                cls_tokens_parts.append(cur_token)
+
+            
             del cls_tokens
             del x
             
@@ -275,14 +262,20 @@ class MoG(nn.Module):
             for block in self.cls_blocks:
                 cls_tokens_parts = block(x_parts, x_cls=cls_tokens_parts, padding_mask=padding_mask)
             
-            
-            cls_tokens_parts = [man.logmap0(cls_tokens_parts[i]) for i,man in enumerate(self.part_manifolds)]
-            
+            # Map to tangent space from particle-representation space
+            tan_cls_tokens_parts = []
+            for i in range(len(cls_tokens_parts)):
+                cur = []
+                for j,k in enumerate(selected_jet_experts[i]):
+                    cur.append(self.part_manifolds[k].logmap0(cls_tokens_parts[i][j]))
+                tan_cls_tokens_parts.append(cur)
+                    
+
             # Concatenate particle man outputs
             if self.n_part_man > 1:
-                x_cls = torch.cat(cls_tokens_parts,dim=-1)
+                x_cls = torch.cat(tan_cls_tokens_parts,dim=-1)
             else:
-                x_cls = cls_tokens_parts[0]
+                x_cls = tan_cls_tokens_parts[0]
             del cls_tokens_parts
              
             # fc
@@ -297,17 +290,18 @@ class MoG(nn.Module):
             if self.shared_expert:
                 selected_part_experts = torch.cat((torch.zeros_like(selected_part_experts[:,0]).unsqueeze(-1),selected_jet_experts+1),dim=-1)
 
-            # Map to correct Jet dim in Euclidean space using MoE
-            x_jets = self.jet_fc[0](x_cls, selected_jet_experts)
-
-            # Map to Jet Manifold
-            x_jets = [man.expmap0(x_jets[i]) for i, man in enumerate(self.jet_manifolds)]
-
-            # Map to final Jet Manifold using MoE
-            x_jets = [self.jet_man_fc[i](x_jets[i]) for i in range(self.n_jet_man)]
-            
+            x_jets = [] # Batch x K x N x F
+            for i in range(x_cls.size(0)):
+                cur_x = []
+                
+                for k in selected_part_experts[i]:
+                    cur_x.append(self.jet_manifolds[k].expmap0(x_cls[i]))
+                    
+                x_jets.append(cur_x)
             del x_cls
-            proc_jets = x_jets
+
+            proc_jets = self.jet_experts(x_jets, selected_jet_experts)
+            del x_jets
             
             x_jets_tan = [man.logmap0(proc_jets[i]) for i,man in enumerate(self.jet_manifolds)]
             
@@ -316,7 +310,7 @@ class MoG(nn.Module):
                 proc_jets = [torch.squeeze(a,0) for a in proc_jets]
                 x_jets_tan = [torch.squeeze(a,0) for a in x_jets_tan]
                 
-                return proc_jets, x_jets_tan,list(self.jet_manifolds)
+                return proc_jets, x_jets_tan,list(self.jet_manifolds),selected_jet_experts
             del x_jets
             
             if self.n_jet_man > 1:

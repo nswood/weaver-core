@@ -35,9 +35,15 @@ class PM_MLP_Expert(nn.Module):
 
 
 class PM_MoE_MLP_Block(nn.Module):
-    def __init__(self, input_dim, output_dim, num_experts, top_k, manifolds, activation='relu'):
+    def __init__(self, input_dim, output_dim, num_experts, top_k, manifolds, activation='relu', shared_expert=False,shared_expert_ratio = 1):
         super().__init__()
-        self.experts = nn.ModuleList([PM_MLP_Expert(input_dim, output_dim, manifolds[i], activation) for i in range(num_experts)])
+        self.experts = nn.ModuleList()
+
+        for i in range(num_experts):
+            if shared_expert and i ==0:
+                self.experts.append(PM_MLP_Expert(input_dim, output_dim*shared_expert_ratio, manifolds[i], activation))
+            else:
+                self.experts.append(PM_MLP_Expert(input_dim,output_dim, manifolds[i], activation))
         self.top_k = top_k
 
     def forward(self, x, selected_experts):
