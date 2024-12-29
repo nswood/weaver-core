@@ -75,7 +75,7 @@ class PM_Attention_Expert(nn.Module):
             print('u shape', u.shape)
             
             u = self.man.expmap0(self.pre_attn_norm(self.man.logmap0(u)))
-            
+            print('padding_mask_cur shape', padding_mask_cur.shape)
             x = self.attn(x_cls, u, u, key_padding_mask=padding_mask_cur)[0]  # (1, batch, embed_dim)
             x = self.man.projx(x)
                 
@@ -83,6 +83,9 @@ class PM_Attention_Expert(nn.Module):
         else:
             residual = x
             x = self.man.expmap0(self.pre_attn_norm(self.man.logmap0(x)))
+            if attn_mask is not None:
+                print('padding_mask', padding_mask.shape)
+                print('attn_mask shape', attn_mask.shape)
             x = self.attn(x, x, x, key_padding_mask=padding_mask,
                             attn_mask=attn_mask)[0]  # (seq_len, batch, embed_dim)
             x = self.man.projx(x)

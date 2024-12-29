@@ -40,7 +40,9 @@ class PM_MoE_MLP_Block(nn.Module):
     def __init__(self, input_dim, output_dim, num_experts, top_k, manifolds, activation='relu', shared_expert=False,shared_expert_ratio = 1):
         super().__init__()
         self.experts = nn.ModuleList()
-
+        if shared_expert:
+            num_experts += 1
+        
         for i in range(num_experts):
             if shared_expert and i ==0:
                 self.experts.append(PM_MLP_Expert(input_dim, output_dim*shared_expert_ratio, manifolds[i], activation))
@@ -58,14 +60,15 @@ class PM_MoE_MLP_Block(nn.Module):
             for i in range(len(x)):
                 if expert_idx in selected_experts[i]:
                     cur_exp_id = torch.nonzero(selected_experts[i] == expert_idx, as_tuple=True)[0].item()                    
-                    batch_elements.append(x[i][cur_exp_id])
+                    batch_elements.append(x[i][cur_exp_id].unsqueeze(0))
                     batch_indices.append(i)
             
             if batch_elements:
                 batch_elements = torch.cat(batch_elements, dim=0)
                 expert_outputs = expert(batch_elements)
-                
+                print('expert_outputs', expert_outputs.shape)
                 for idx, output in zip(batch_indices, expert_outputs):
+                    print('output', output.shape)
                     outputs[idx].append(output)
         
         return outputs
