@@ -61,9 +61,9 @@ class PM_Attention_Expert(nn.Module):
             
     def forward(self, x, x_cls = None, padding_mask=None, attn_mask=None):
         
-        print('x shape', x.shape)
+        # print('x shape', x.shape)
         if x_cls is not None:
-            print('x_cls shape', x_cls.shape)
+            # print('x_cls shape', x_cls.shape)
             
             with torch.no_grad():
                 # prepend one element for x_cls: -> (batch, 1+seq_len)
@@ -72,10 +72,10 @@ class PM_Attention_Expert(nn.Module):
             # class attention: https://arxiv.org/pdf/2103.17239.pdf
             residual = x_cls
             u = torch.cat((x_cls, x), dim=0)  # (seq_len+1, batch, embed_dim)
-            print('u shape', u.shape)
+            # print('u shape', u.shape)
             
             u = self.man.expmap0(self.pre_attn_norm(self.man.logmap0(u)))
-            print('padding_mask_cur shape', padding_mask_cur.shape)
+            # print('padding_mask_cur shape', padding_mask_cur.shape)
             x = self.attn(x_cls, u, u, key_padding_mask=padding_mask_cur)[0]  # (1, batch, embed_dim)
             x = self.man.projx(x)
                 
@@ -83,9 +83,9 @@ class PM_Attention_Expert(nn.Module):
         else:
             residual = x
             x = self.man.expmap0(self.pre_attn_norm(self.man.logmap0(x)))
-            if attn_mask is not None:
-                print('padding_mask', padding_mask.shape)
-                print('attn_mask shape', attn_mask.shape)
+            # if attn_mask is not None:
+                # print('padding_mask', padding_mask.shape)
+                # print('attn_mask shape', attn_mask.shape)
             x = self.attn(x, x, x, key_padding_mask=padding_mask,
                             attn_mask=attn_mask)[0]  # (seq_len, batch, embed_dim)
             x = self.man.projx(x)
@@ -109,7 +109,7 @@ class PM_Attention_Expert(nn.Module):
         x = self.man.mobius_add(x,residual)
         x = self.man.projx(x)
         
-        print('Expert output shape', x.shape)
+        # print('Expert output shape', x.shape)
         return x
 
 
@@ -140,7 +140,7 @@ class PM_MoE_Att_Block(nn.Module):
     def forward(self, features, expert_indices, x_cls = None, padding_mask=None, attn_mask=None):
         # Initialize a list to store the outputs for each sample
         batch = len(features)
-        print(batch)
+        # print(batch)
         outputs = [[] for _ in range(batch)]
         # features N x K x P x F
         # expert_indices N x K
@@ -152,38 +152,57 @@ class PM_MoE_Att_Block(nn.Module):
             # Collect all elements from the batch that need to pass through the current expert
             batch_elements = []
             batch_x_cls = []
+            batch_padding_mask = []
+            if attn_mask is not None:
+                batch_attn_mask = []
             batch_indices = []
             
             for i in range(batch):
                 if expert_idx in expert_indices[i]:
                     j = (expert_indices[i] == expert_idx).nonzero(as_tuple=True)[0].item()
                     batch_elements.append(features[i][j].unsqueeze(0))
+                    batch_padding_mask.append(padding_mask[i].unsqueeze(0))
+                    if attn_mask is not None:
+                        batch_attn_mask.append(attn_mask[i].unsqueeze(0))
                     if x_cls is not None:
+                        # print('x_cls[i][j]',x_cls[i][j].shape)
                         batch_x_cls.append(x_cls[i][j])
                     batch_indices.append(i)
             
             if batch_elements:
                 # Stack the collected elements to form a batch
-                print('pre cat batch_elements', batch_elements[0].shape)
+                # print('pre cat batch_elements', batch_elements[0].shape)
 
                 batch_elements = torch.cat(batch_elements, dim=0)
-                print('post cat batch_elements', batch_elements.shape)
-                if x_cls is not None:
-                    print('batch_x_cls before cat', batch_x_cls[0].shape)
-                    batch_x_cls = torch.cat(batch_x_cls, dim=0)
-                    print('batch_x_cls', batch_x_cls.shape)
+                # print('post cat batch_elements', batch_elements.shape)
+
+                batch_padding_mask = torch.cat(batch_padding_mask, dim=0).bool()
+                # print('batch_padding_mask', batch_padding_mask.shape)
+                if attn_mask is not None:
+                    batch_attn_mask = torch.cat(batch_attn_mask, dim=0)
+                    # print('batch_attn_mask', batch_attn_mask.shape)
+
                 batch_elements = batch_elements.permute(1, 0, 2)
-                print('permuted batch_elements', batch_elements.shape)
+                # print('permuted batch_elements', batch_elements.shape)
+                if x_cls is not None:
+                    # print('batch_x_cls before cat', batch_x_cls[0].shape)
+                    batch_x_cls = torch.cat(batch_x_cls, dim=0).permute(1, 0, 2)
+                    # print('batch_x_cls', batch_x_cls.shape)
+                # batch_elements = batch_elements.permute(1, 0, 2)
+                # print('permuted batch_elements', batch_elements.shape)
                 # Pass the batch through the expert
                 if x_cls is not None:
-                    expert_outputs = expert(batch_elements, x_cls = batch_x_cls, padding_mask=padding_mask, attn_mask=attn_mask)
+                    expert_outputs = expert(batch_elements, 
+                                            x_cls = batch_x_cls, 
+                                            padding_mask=batch_padding_mask)
                 else:
-                    expert_outputs = expert(batch_elements, padding_mask=padding_mask, attn_mask=attn_mask)
+                    expert_outputs = expert(batch_elements, padding_mask=batch_padding_mask, 
+                                            attn_mask=batch_attn_mask)
                 expert_outputs = expert_outputs.permute(1, 0, 2)
                 
                 # Recombine the outputs
                 for idx, output in zip(batch_indices, expert_outputs):
-                    print('output shape', output.shape)
+                    # print('output shape', output.shape)
                     if x_cls is not None:
                         output = output.unsqueeze(1)
                     outputs[idx].append(output)

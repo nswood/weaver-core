@@ -32,7 +32,7 @@ class PM_MLP_Expert(nn.Module):
     def forward(self, x):
         x = self.fc(x)
         x = self.man_fc(self.man.expmap0(x))
-        print('MLP expert output', x.shape)
+        # print('MLP expert output', x.shape)
         return x
 
 
@@ -66,9 +66,9 @@ class PM_MoE_MLP_Block(nn.Module):
             if batch_elements:
                 batch_elements = torch.cat(batch_elements, dim=0)
                 expert_outputs = expert(batch_elements)
-                print('expert_outputs', expert_outputs.shape)
+                # print('expert_outputs', expert_outputs.shape)
                 for idx, output in zip(batch_indices, expert_outputs):
-                    print('output', output.shape)
+                    # print('output', output.shape)
                     outputs[idx].append(output)
         
         return outputs

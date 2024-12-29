@@ -180,12 +180,13 @@ class MoG(nn.Module):
         self.pair_extra_dim = pair_extra_dim
 
         self.embed = Embed(input_dim, embed_dims, activation=activation) if len(embed_dims) > 0 else nn.Identity()
-        
+
+        pair_embed_dims = [32, 32, 32]
         self.pair_embed = PairEmbed(
             pair_input_dim, pair_extra_dim, pair_embed_dims + [cfg_block['num_heads']],
             remove_self_pair=remove_self_pair, use_pre_activation_pair=use_pre_activation_pair,
             for_onnx=for_inference) if pair_embed_dims is not None and pair_input_dim + pair_extra_dim > 0 else None
-        
+        # print(self.pair_embed)
         self.part_embedding = nn.ModuleList()
         for i, man in enumerate(self.part_manifolds):
             if i == 0 and shared_expert:
@@ -244,7 +245,8 @@ class MoG(nn.Module):
         # mask: (N, 1, P) -- real particle = 1, padded = 0
         # for pytorch: uu (N, C', num_pairs), uu_idx (N, 2, num_pairs)
         # for onnx: uu (N, C', P, P), uu_idx=None
-        print(x.shape)
+        # print(x.shape)
+        
         
         with torch.no_grad():
             if not self.for_inference:
@@ -264,8 +266,11 @@ class MoG(nn.Module):
             
             # print(x.shape)
             attn_mask = None
+            # print(v is not None)
+            # print(uu is not None)
+            # print(self.pair_embed is not None)
             if (v is not None or uu is not None) and self.pair_embed is not None:
-                print('creating attention mask')
+                # print('creating attention mask')
                 attn_mask = self.pair_embed(v, uu).view(-1, v.size(-1), v.size(-1))  # (N*num_heads, P, P)
             
             # print(x[:self.part_router_n_parts].shape)
@@ -291,10 +296,10 @@ class MoG(nn.Module):
                 cur_x = []
                 cur_token = []
                 for k in selected_part_experts[i]:
-                    print(x[:,i].shape)
-                    print(self.cls_token[k])
-                    cls_tokens = self.cls_token[k].expand(1, x.size(1), -1)
-                    print(cls_tokens.shape)
+                    # print(x[:,i].shape)
+                    # print(self.cls_token[k].shape)
+                    cls_tokens = self.cls_token[k]#.expand(1, x.size(1), -1)
+                    # print(cls_tokens.shape)
                     cur_x.append(self.part_manifolds[k].expmap0(x[:,i]))
                     cur_token.append(cls_tokens)
                 x_parts.append(cur_x)
@@ -308,14 +313,14 @@ class MoG(nn.Module):
             
             # transform
             for block in self.blocks:
-                print('Att block')
+                # print('Att block')
                 x_parts = block(x_parts,selected_part_experts, x_cls=None, 
                                 padding_mask=padding_mask, attn_mask=attn_mask)
-                print('Batch', len(x_parts))
-                print('Number of experts',len(x_parts[0]))
-                for i in range(len(x_parts[0])):
-                    print('Expert',i)
-                    print('Data shape',x_parts[0][i].shape)
+                # print('Batch', len(x_parts))
+                # print('Number of experts',len(x_parts[0]))
+                # for i in range(len(x_parts[0])):
+                #     print('Expert',i)
+                #     print('Data shape',x_parts[0][i].shape)
 
 
             # print('Original cls tokens')
@@ -325,7 +330,7 @@ class MoG(nn.Module):
             #     print('Expert',i)
             #     print('Data shape',cls_tokens_parts[0][i].shape)
 
-
+            
             for block in self.cls_blocks:
                 # print('cls block')
                 cls_tokens_parts = block(x_parts,selected_part_experts, x_cls=cls_tokens_parts, padding_mask=padding_mask)
@@ -400,10 +405,7 @@ class MoG(nn.Module):
                 # print('proc_jets[i]',len(proc_jets[i]))
                 for k in selected_jet_experts[i]:
                     cur_selected_index = torch.nonzero(selected_jet_experts[i] == k, as_tuple=True)[0].item()
-                    # print('cur_selected_index',cur_selected_index)
-                    # print('k',k)
-                    # print(self.jet_manifolds[k])
-                    # print()
+                    
                     cur_x.append(self.jet_manifolds[k].logmap0(proc_jets[i][cur_selected_index]))
                     
                 x_jets_tan.append(cur_x)
@@ -420,9 +422,11 @@ class MoG(nn.Module):
                 x_out = [torch.cat(a,dim=-1) for a in x_jets_tan]
             else:
                 x_out = [a[0] for a in x_jets_tan]
-            x_out = torch.cat(x_out,dim=0)
+            # print('Len x_out',len(x_out))
+            # print('Shape x_out[0]',x_out[0].shape)
+            x_out = torch.vstack(x_out)
 
-            # print('x_out',x_out.shape)
+            # print('x_out post cat',x_out.shape)
             
             # Regular LayerNorm    
             x_out = self.norm(x_out).squeeze(0)
