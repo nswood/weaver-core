@@ -279,12 +279,13 @@ class MoG(nn.Module):
             
             # print(x_for_router[:self.part_router_n_parts].reshape(x_for_router.size(1),-1).shape)
 
-            router_output = self.part_router(x_for_router[:self.part_router_n_parts].reshape(x_for_router.size(1),-1))
-            selected_part_experts = torch.topk(router_output, self.top_k_part, dim = -1).indices
+            part_router_output = self.part_router(x_for_router[:self.part_router_n_parts].reshape(x_for_router.size(1),-1))
+            selected_part_experts = torch.topk(part_router_output, self.top_k_part, dim = -1).indices
             # print(selected_part_experts[0:10])
             # If shared expert, always route to index 0 and select remaining experts from 1 to n
             if self.shared_expert:
                 selected_part_experts = torch.cat((torch.zeros_like(selected_part_experts[:,0]).unsqueeze(-1),selected_part_experts+1),dim=-1)
+            
             # print(selected_part_experts[0:10])
             
             # Map input onto selected particle manifolds
@@ -366,9 +367,9 @@ class MoG(nn.Module):
             x_cls = x_cls.squeeze(1)
             del cls_tokens_parts
                 
-            router_output = self.jet_router(x_cls)
+            jet_router_output = self.jet_router(x_cls)
 
-            selected_jet_experts = torch.topk(router_output, self.top_k_jet, dim=-1).indices
+            selected_jet_experts = torch.topk(jet_router_output, self.top_k_jet, dim=-1).indices
             
             # If shared expert, always route to index 0 and select remaining experts from 1 to n
             if self.shared_expert:
@@ -395,8 +396,10 @@ class MoG(nn.Module):
 
             
             del x_jets
+
             # proc_jets = [torch.tensor(a).to(a[0].device) for a in proc_jets]
             # print('Number of jet experts', len(self.jet_manifolds))
+
             x_jets_tan = [] # Batch x K x N x F
             
             for i in range(len(proc_jets)):
@@ -424,6 +427,7 @@ class MoG(nn.Module):
                 x_out = [a[0] for a in x_jets_tan]
             # print('Len x_out',len(x_out))
             # print('Shape x_out[0]',x_out[0].shape)
+            
             x_out = torch.vstack(x_out)
 
             # print('x_out post cat',x_out.shape)
@@ -435,7 +439,7 @@ class MoG(nn.Module):
             output = self.final_fc(x_out).squeeze(0)
             if self.for_inference:
                 output = torch.softmax(output, dim=1)
-            return output
+            return output, part_router_output, jet_router_output
 
 
 

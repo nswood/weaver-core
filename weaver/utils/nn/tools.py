@@ -53,7 +53,7 @@ def _flatten_preds(model_output, label=None, mask=None, label_axis=1):
 
 def train_classification(
         model, loss_func, opt, scheduler, train_loader, dev, epoch, steps_per_epoch=None, grad_scaler=None,
-        tb_helper=None,args = None):
+        tb_helper=None, args = None):
     model.train()
 
     data_config = train_loader.dataset.config
@@ -77,8 +77,11 @@ def train_classification(
 #             opt.zero_grad()
             with torch.cuda.amp.autocast(enabled=grad_scaler is not None):
                 model_output = model(*inputs)
-                logits, label, _ = _flatten_preds(model_output, label=label, mask=mask)
-                loss = loss_func(logits, label)
+                preds, r1,r2 = model_output
+                # logits, label, _ = _flatten_preds(model_output, label=label, mask=mask)
+
+                logits, label, _ = _flatten_preds(preds, label=label, mask=mask)
+                loss = loss_func(logits, label,r1,r2)
 #             if args.clip_norm > 0:
 #                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_norm)
             if grad_scaler is None:
@@ -226,9 +229,12 @@ def evaluate_classification(model, test_loader, dev, epoch, for_training=True, l
 
                     
                     model_output = model(*inputs)
+                    preds, r1,r2 = model_output
+                    # logits, label, _ = _flatten_preds(model_output, label=label, mask=mask)
 
+                    logits, label, _ = _flatten_preds(preds, label=label, mask=mask)
 
-                    logits, label, mask = _flatten_preds(model_output, label=label, mask=mask)
+                    # logits, label, mask = _flatten_preds(model_output, label=label, mask=mask)
                     scores.append(torch.softmax(logits.float(), dim=1).numpy(force=True))
 
                     if mask is not None:
