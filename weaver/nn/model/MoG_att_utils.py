@@ -13,7 +13,6 @@ os.environ['PYTHONPATH'] = '/n/home11/nswood/weaver-core/weaver/nn/model'
 
 from weaver.nn.model.PM_utils import *
 
-
 class PM_Attention_Expert(nn.Module):
     def __init__(self,
                  man, 
@@ -48,10 +47,10 @@ class PM_Attention_Expert(nn.Module):
         self.act_dropout = nn.Dropout(activation_dropout)
         
                                   
-        act = Mob_Act(nn.ReLU(), self.man)
-        if act is not None:
-            self.fc1 = nn.Sequential(Manifold_Linear(embed_dim, self.ffn_dim,ball = self.man, weight_init_ratio = weight_init_ratio), act)
-            self.fc2 = nn.Sequential(Manifold_Linear(self.ffn_dim, embed_dim,ball = self.man, weight_init_ratio = weight_init_ratio), act)
+        
+        self.swiglu = SwiGLU(embed_dim, 4*self.ffn_dim)
+        # self.fc1 = nn.Sequential(Manifold_Linear(embed_dim, self.ffn_dim,ball = self.man, weight_init_ratio = weight_init_ratio), act)
+        self.fc2 = nn.Sequential(Manifold_Linear(4*self.ffn_dim, embed_dim,ball = self.man, weight_init_ratio = weight_init_ratio))
 
 
         self.attn = ManifoldMHA(embed_dim,num_heads,dropout=attn_dropout, ball = self.man, weight_init_ratio = weight_init_ratio,att_metric = 'tan_space')                                   
@@ -100,10 +99,9 @@ class PM_Attention_Expert(nn.Module):
         x = self.man.expmap0(self.pre_fc_norm(self.man.logmap0(x)))
         
         x = self.man.projx(x)
-        x = self.fc1(x)
-        x = self.act_dropout(x)
-        x = self.man.projx(x)
+        x = self.man.expmap0(self.swiglu(self.man.logmap0(x)))
         x = self.fc2(x)
+        x = self.act_dropout(x)
         
         # Residual Aggregation
         x = self.man.mobius_add(x,residual)

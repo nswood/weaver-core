@@ -35,6 +35,30 @@ from scipy.special import beta
 from geoopt.manifolds.stereographic.math import mobius_fn_apply
 
   
+
+class SwiGLU(nn.Module):
+    def __init__(self, input_dim, hidden_dim, beta=1.0):
+        super(SwiGLU, self).__init__()
+        self.beta = beta
+        
+        # Linear layers for W and V with biases b and c
+        self.W = nn.Linear(input_dim, hidden_dim)
+        self.V = nn.Linear(input_dim, hidden_dim)
+
+    def swish(self, x):
+        return x * torch.sigmoid(self.beta * x)
+
+    def forward(self, x):
+        # Linear transformations
+        xW = self.W(x)  # W(x) + b
+        xV = self.V(x)  # V(x) + c
+        
+        # Apply Swish activation to xW
+        activated = self.swish(xW)
+        
+        # Element-wise multiplication
+        return activated * xV   
+
 class Mob_Act(nn.Module):
     def __init__(self,fn, man):
         super().__init__()

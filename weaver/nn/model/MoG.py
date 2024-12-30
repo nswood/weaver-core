@@ -32,6 +32,9 @@ def two_point_mid(x1,x2, man, w1,w2):
     return mid
 
 
+ 
+
+
 class MoG(nn.Module):
 
     def __init__(self,
@@ -58,7 +61,7 @@ class MoG(nn.Module):
                  block_params=None,
                  cls_block_params={'dropout': 0, 'attn_dropout': 0, 'activation_dropout': 0},
                  fc_params=[],
-                 activation='gelu',
+                 activation='relu',
                  # misc
                  trim=True,
                  for_inference=False,
@@ -76,6 +79,8 @@ class MoG(nn.Module):
         total_jet_dim = 0
         self.shared_expert = shared_expert
 
+        if activation == 'relu':
+            self.activation = nn.ReLU()
 
         if shared_expert:
             self.part_manifolds.append(geoopt.Euclidean())
@@ -121,7 +126,7 @@ class MoG(nn.Module):
 
         self.part_router = nn.Sequential(
                                     nn.Linear(part_router_input,int(part_router_input*0.25)), 
-                                    nn.ReLU(),
+                                    self.activation,
                                     nn.Linear(int(part_router_input*0.25), part_experts),
                                     nn.Softmax(dim = -1))
 
@@ -131,7 +136,7 @@ class MoG(nn.Module):
         jet_router_input = part_experts_dim
 
         self.jet_router = nn.Sequential(nn.Linear(jet_router_input, int(jet_router_input*0.25)),
-                                        nn.ReLU(),
+                                        self.activation,
                                         nn.Linear(int(jet_router_input*0.25), jet_experts),
                                         nn.Softmax(dim = -1))
         
@@ -149,7 +154,6 @@ class MoG(nn.Module):
         self.trimmer = SequenceTrimmer(enabled=trim and not for_inference)
         self.for_inference = for_inference
         self.use_amp = use_amp
-        
         
         default_cfg = dict(manifolds=self.part_manifolds,
                            embed_dim=embed_dim, 
@@ -229,23 +233,21 @@ class MoG(nn.Module):
         #                                     top_k=top_k_jet, 
         #                                     shared_expert_ratio=shared_expert_ratio,
         #                                     shared_expert=shared_expert)
-            
+        
         # post_jet_dim = top_k_jet * jet_experts_dim
         if shared_expert:
             post_jet_dim = self.jet_shared_expert_dim
         else:
             post_jet_dim = jet_experts_dim
 
-        self.final_fc = nn.Sequential(nn.Linear(post_jet_dim, post_jet_dim), nn.ReLU(),
-                                        nn.Linear(post_jet_dim, post_jet_dim), nn.ReLU(),
-                                        nn.Linear(post_jet_dim, num_classes))
+        self.final_fc = nn.Sequential(nn.Linear(post_jet_dim, int(post_jet_dim/2)), self.activation,
+                                        nn.Linear(int(post_jet_dim/2), int(post_jet_dim/4)), self.activation,
+                                        nn.Linear(int(post_jet_dim/4), num_classes))
         
         # init
         self.cls_token = nn.ParameterList()
         for i,man in enumerate(self.part_manifolds):
-            # if i == 0 and shared_expert:
-            #     cur_token = geoopt.ManifoldParameter(torch.zeros(1, 1, self.part_shared_expert_dim), requires_grad=True, manifold = man)
-            # else:
+            
             cur_token = geoopt.ManifoldParameter(torch.zeros(1, 1, embed_dim), requires_grad=True, manifold = man)
             trunc_normal_(cur_token, std=.02)
             self.cls_token.append(cur_token)

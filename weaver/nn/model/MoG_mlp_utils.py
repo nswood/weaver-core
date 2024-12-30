@@ -17,21 +17,18 @@ from weaver.nn.model.PM_utils import *
 class PM_MLP_Expert(nn.Module):
     def __init__(self, input_dim, output_dim,man, activation='relu'):
         super().__init__()
-        self.fc = nn.Sequential(
-            nn.Linear(input_dim, input_dim + int((output_dim - input_dim) * 0.5)), nn.ReLU(),
-            nn.Linear(input_dim + int((output_dim - input_dim) * 0.5), input_dim + int((output_dim - input_dim) * 0.75)), nn.ReLU(),
-            nn.Linear(input_dim + int((output_dim - input_dim) * 0.75), output_dim), nn.ReLU()
-        )
+        
         self.man = man
+        self.swiglu = SwiGLU(input_dim, 4*output_dim)
         self.man_fc = nn.Sequential(
-                Manifold_Linear(output_dim, output_dim, ball=man), 
+                Manifold_Linear(4*output_dim, 4*output_dim, ball=man), 
                 nn.ReLU(),
-                Manifold_Linear(output_dim, output_dim, ball=man)
+                Manifold_Linear(4*output_dim, output_dim, ball=man)
             )
 
     def forward(self, x):
-        x = self.fc(x)
-        x = self.man_fc(self.man.expmap0(x))
+        x = self.man.expmap0(self.swiglu(self.man.logmap0(x)))
+        x = self.man_fc(x)
         # print('MLP expert output', x.shape)
         return x
 
