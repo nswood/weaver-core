@@ -36,7 +36,7 @@ def two_point_mid(x1,x2, man, w1,w2):
 
 
 class MoG(nn.Module):
-
+    
     def __init__(self,
                  input_dim,
                  num_classes=None,

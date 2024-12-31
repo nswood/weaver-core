@@ -20,6 +20,7 @@ class PM_MLP_Expert(nn.Module):
         
         self.man = man
         self.swiglu = SwiGLU(input_dim, 4*output_dim)
+        
         self.man_fc = nn.Sequential(
                 Manifold_Linear(4*output_dim, 4*output_dim, ball=man), 
                 nn.ReLU(),
