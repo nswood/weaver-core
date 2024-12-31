@@ -7,9 +7,8 @@ import torch.nn as nn
 from functools import partial
 
 from weaver.utils.logger import _logger
-
 import os
-os.environ['PYTHONPATH'] = '/n/home11/nswood/weaver-core/weaver/nn/model'
+# os.environ['PYTHONPATH'] = '/n/home11/nswood/weaver-core/weaver/nn/model'
 
 from weaver.nn.model.PM_utils import *
 
