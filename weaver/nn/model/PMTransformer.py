@@ -896,7 +896,7 @@ class PMTransformer(nn.Module):
                 
             for block in self.cls_blocks:
                 cls_tokens_parts = block(x_parts, pm_x_cls=cls_tokens_parts, padding_mask=padding_mask)
-            
+                
             
             cls_tokens_parts = [man.logmap0(cls_tokens_parts[i]) for i,man in enumerate(self.part_manifolds)]
             
