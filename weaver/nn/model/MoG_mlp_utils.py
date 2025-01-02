@@ -19,15 +19,24 @@ class PM_MLP_Expert(nn.Module):
         
         self.man = man
         self.swiglu = SwiGLU(input_dim, 4*output_dim)
-        
-        self.man_fc = nn.Sequential(
-                Manifold_Linear(4*output_dim, 4*output_dim, ball=man), 
+        self.Euclidean = self.man.name == 'Euclidean'
+        if self.Euclidean:
+            self.man_fc = nn.Sequential(nn.Linear(4*output_dim, 4*output_dim), 
                 nn.ReLU(),
-                Manifold_Linear(4*output_dim, output_dim, ball=man)
+                nn.Linear(4*output_dim, output_dim)
             )
+        else:
+            self.man_fc = nn.Sequential(
+                    Manifold_Linear(4*output_dim, 4*output_dim, ball=man), 
+                    Mob_Act(nn.ReLU(),man),
+                    Manifold_Linear(4*output_dim, output_dim, ball=man)
+                )
 
     def forward(self, x):
-        x = self.man.expmap0(self.swiglu(self.man.logmap0(x)))
+        if self.Euclidean:
+            x = self.swiglu(x)
+        else:
+            x = self.man.expmap0(self.swiglu(self.man.logmap0(x)))
         x = self.man_fc(x)
         # print('MLP expert output', x.shape)
         return x

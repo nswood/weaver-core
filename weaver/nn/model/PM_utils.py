@@ -131,7 +131,7 @@ class Manifold_Linear(nn.Module):
         return "in_features={}, out_features={}, bias={}, c={}".format(
             self.in_features, self.out_features, self.bias is not None, self.ball
         )
-
+    
 
     
 class ManifoldMHA(nn.Module):
