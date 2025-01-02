@@ -14,22 +14,22 @@ from weaver.nn.model.PM_utils import *
 
 
 class PM_MLP_Expert(nn.Module):
-    def __init__(self, input_dim, output_dim,man, activation='relu'):
+    def __init__(self, input_dim, output_dim,man, activation='relu',ffn_ratio = 4):
         super().__init__()
         
         self.man = man
-        self.swiglu = SwiGLU(input_dim, 4*output_dim)
+        self.swiglu = SwiGLU(input_dim, ffn_ratio*output_dim)
         self.Euclidean = self.man.name == 'Euclidean'
         if self.Euclidean:
-            self.man_fc = nn.Sequential(nn.Linear(4*output_dim, 4*output_dim), 
+            self.man_fc = nn.Sequential(nn.Linear(ffn_ratio*output_dim, ffn_ratio*output_dim), 
                 nn.ReLU(),
-                nn.Linear(4*output_dim, output_dim)
+                nn.Linear(ffn_ratio*output_dim, output_dim)
             )
         else:
             self.man_fc = nn.Sequential(
-                    Manifold_Linear(4*output_dim, 4*output_dim, ball=man), 
+                    Manifold_Linear(ffn_ratio*output_dim, ffn_ratio*output_dim, ball=man), 
                     Mob_Act(nn.ReLU(),man),
-                    Manifold_Linear(4*output_dim, output_dim, ball=man)
+                    Manifold_Linear(ffn_ratio*output_dim, output_dim, ball=man)
                 )
 
     def forward(self, x):
@@ -43,7 +43,16 @@ class PM_MLP_Expert(nn.Module):
 
 
 class PM_MoE_MLP_Block(nn.Module):
-    def __init__(self, input_dim, output_dim, num_experts, top_k, manifolds, activation='relu', shared_expert=False,shared_expert_ratio = 1):
+    def __init__(self, 
+                 input_dim, 
+                 output_dim, 
+                 num_experts, 
+                 top_k, 
+                 manifolds, 
+                 activation='relu', 
+                 shared_expert=False,
+                 shared_expert_ratio = 1,
+                 ffn_ratio = 4):
         super().__init__()
         self.experts = nn.ModuleList()
         if shared_expert:
@@ -51,9 +60,9 @@ class PM_MoE_MLP_Block(nn.Module):
         
         for i in range(num_experts):
             if shared_expert and i ==0:
-                self.experts.append(PM_MLP_Expert(input_dim, output_dim*shared_expert_ratio, manifolds[i], activation))
+                self.experts.append(PM_MLP_Expert(input_dim, output_dim*shared_expert_ratio, manifolds[i], activation, ffn_ratio))
             else:
-                self.experts.append(PM_MLP_Expert(input_dim,output_dim, manifolds[i], activation))
+                self.experts.append(PM_MLP_Expert(input_dim,output_dim, manifolds[i], activation, ffn_ratio))
         self.top_k = top_k
 
     def forward(self, x, selected_experts):

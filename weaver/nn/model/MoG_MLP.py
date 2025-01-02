@@ -42,6 +42,7 @@ class MoG(nn.Module):
                  remove_self_pair=False,
                  use_pre_activation_pair=True,
                  pair_embed_dims=[64, 64, 64],
+                 ffn_ratio=2,
                  part_experts = 6,
                  part_expert_curvature_init = [],
                  part_experts_dim = 32,
@@ -109,8 +110,29 @@ class MoG(nn.Module):
 
         total_jet_dim += top_k_jet*jet_experts_dim
         
-        print('Particle Manifolds:',self.part_manifolds)
-        print('Jet Manifolds:',self.jet_manifolds)
+        print('Particle Manifolds:')
+        print('====================')
+        print('====================')
+        for i,man in enumerate(self.part_manifolds):
+            if man.name == 'Euclidean':
+                print('Euclidean Manifold',i)
+            else:
+                print('Stereographic Manifold:',i, 'Curvature:',man.k)
+        print('====================')
+        print('==================== \n\n')
+
+        
+        
+        print('Jet Manifolds:')
+        print('====================')
+        print('====================')
+        for i,man in enumerate(self.jet_manifolds):
+            if man.name == 'Euclidean':
+                print('Euclidean Manifold',i)
+            else:
+                print('Stereographic Manifold:',i, 'Curvature:',man.k)
+        print('====================')
+        print('====================')
 
         self.top_k_part = top_k_part
         self.top_k_jet = top_k_jet
@@ -166,7 +188,8 @@ class MoG(nn.Module):
                                             num_experts=part_experts, 
                                             top_k=top_k_part, 
                                             shared_expert_ratio=shared_expert_ratio,
-                                            shared_expert=shared_expert)
+                                            shared_expert=shared_expert,
+                                            ffn_ratio = ffn_ratio)
         
         # Jet MLP Experts
         mlp_input_dim = part_experts_dim
@@ -176,16 +199,21 @@ class MoG(nn.Module):
                                             num_experts=jet_experts, 
                                             top_k=top_k_jet, 
                                             shared_expert_ratio=shared_expert_ratio,
-                                            shared_expert=shared_expert)
+                                            shared_expert=shared_expert,
+                                            ffn_ratio = ffn_ratio)
         
         if shared_expert:
             post_jet_dim = self.jet_shared_expert_dim
         else:
             post_jet_dim = jet_experts_dim
-
-        self.final_fc = nn.Sequential(nn.Linear(post_jet_dim, int(post_jet_dim/2)), self.activation,
-                                        nn.Linear(int(post_jet_dim/2), int(post_jet_dim/4)), self.activation,
-                                        nn.Linear(int(post_jet_dim/4), num_classes))
+        dim_dif = post_jet_dim - num_classes
+        d1 = post_jet_dim - int(dim_dif*0.5)
+        d2 = d1 - int(dim_dif*0.25)
+        self.final_fc = nn.Sequential(nn.Linear(post_jet_dim, d1), 
+                                        self.activation,
+                                        nn.Linear(d1, d2), 
+                                        self.activation,
+                                        nn.Linear(d2, num_classes))
         
         
         
