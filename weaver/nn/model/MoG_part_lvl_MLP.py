@@ -11,8 +11,8 @@ from weaver.utils.logger import _logger
 import os
 from weaver.nn.model.PM_utils import *
 from weaver.nn.model.utils import *
-from weaver.nn.model.MoG_att_utils import *
 from weaver.nn.model.MoG_mlp_utils import *
+from weaver.nn.model.MoG_part_lvl_mlp_utils import *
 
 
 def two_point_mid(x1,x2, man, w1,w2):
@@ -108,10 +108,13 @@ class MoG_part_lvl_MLP(nn.Module):
         total_part_dim = 0
         total_jet_dim = 0
         self.shared_expert = shared_expert
+        self.part_expert_dim = part_experts_dim
+        self.jet_expert_dim = jet_experts_dim
 
         self.all_k = all_k
         self.local_geom_pooling = nn.ModuleList(CrossAttentionPooling(part_experts_dim, 1) for _ in all_k)
         
+        self.part_tan_space_pooling = CrossAttentionPooling(part_experts_dim, 1)
             
         
         
@@ -185,7 +188,7 @@ class MoG_part_lvl_MLP(nn.Module):
 
         # Particle Router
         embed_dim = part_experts_dim        
-        part_router_input= input_dim
+        part_router_input= part_experts_dim * len(all_k)
 
         dim_dif = part_router_input - part_experts_dim
         d1 = part_router_input - int(dim_dif*0.5)
@@ -223,7 +226,7 @@ class MoG_part_lvl_MLP(nn.Module):
 
         # Particle MLP Experts
         mlp_input_dim = part_experts_dim
-        self.part_experts = PM_MoE_MLP_Block(manifolds = self.jet_manifolds,
+        self.part_experts = PM_MoE_part_lvl_MLP_Block(manifolds = self.jet_manifolds,
                                             input_dim=input_dim, 
                                             output_dim=part_experts_dim, 
                                             num_experts=part_experts, 
@@ -280,15 +283,17 @@ class MoG_part_lvl_MLP(nn.Module):
             x = x.permute(2,0,1) # (N, C, P) -> (P, N, C)
             v = v.permute(2,0,1) if v is not None else None  # (P, N, C)
             local_geom_features = []
+
             # Iterate over jets
             for i in range(x.size(1)):
                 # Calculating interaction features for particle EMD
                 cur_v = v[:,i] if v is not None else None
                 cur_x = x[:,i]
+                cur_mask = padding_mask[i]
 
                 part_energy = cur_v[:, 3] if v is not None else None  # (P, N)
                 part_pT = torch.norm(cur_v[:,:2], dim=-1) if v is not None else None  # (P, N)
-                part_eta = 0.5 * torch.log((part_pT + v[:, 2]) / (part_pT - cur_v[:, 2])) if v is not None else None  # (P, N)
+                part_eta = 0.5 * torch.log((part_pT + cur_v[:, 2]) / (part_pT - cur_v[:, 2])) if v is not None else None  # (P, N)
                 part_phi = torch.atan2(cur_v[:, 1], cur_v[:, 0]) if v is not None else None  # (P, N)
 
                 # Compute pairwise energy differences |E_i - E_j|
@@ -313,10 +318,10 @@ class MoG_part_lvl_MLP(nn.Module):
                 # Loop over all particles in the jet
                 for j in range(cur_v.size(0)):
                     cur_output =[]
-                    cur_mask = padding_mask[j]
-                    is_zero_pad = cur_mask[j,j] == 0
+                    is_zero_pad = cur_mask[j] == 0
+                    
                     if is_zero_pad:
-                        output.append(torch.zeros(len(self.all_k)*self.part_experts_dim))
+                        output.append(torch.zeros(len(self.all_k)*self.part_expert_dim).to(x.device))
                         continue
                     else:
                         for k_i, k in enumerate(self.all_k):
@@ -341,36 +346,50 @@ class MoG_part_lvl_MLP(nn.Module):
             if self.shared_expert:
                 selected_part_experts = torch.cat((torch.zeros_like(selected_part_experts[:,:,0]).unsqueeze(-1),selected_part_experts+1),dim=-1)
             
-            print('selected_part_experts.shape:',selected_part_experts.shape)
+            # print('selected_part_experts.shape:',selected_part_experts.shape)
+            
             # Map input onto selected particle manifolds
             # x shape: (P, N, C)
+            # selected_part_experts: (P, N, K)
+            x_parts = []  # P x N x K x F
+            for p in range(x.size(0)):  # Loop over each particle
+                cur_p = []
+                for i in range(x.size(1)):  # Loop over each dimension of N
+                    cur_x = []
+                    for k in selected_part_experts[p, i]:  # Use particle-specific indices
+                        if self.part_manifolds[k].name == 'Euclidean':
+                            cur_x.append(self.part_experts_norms[k](x[p, i]))
+                        else:
+                            cur_x.append(self.part_manifolds[k].expmap0(self.part_experts_norms[k](x[p, i])))
+                    cur_p.append(torch.stack(cur_x, dim=0))  # Stack along the K dimension
+                x_parts.append(torch.stack(cur_p, dim=0))  # Stack along the N dimension
 
-            x_parts = [] # N x K x P x F
-            for i in range(x.size(1)):
-                cur_x = []
-                for k in selected_part_experts[i]:
-                    if self.part_manifolds[k].name == 'Euclidean':
-                        cur_x.append(self.part_experts_norms[k](x[:,i]))
-                    else:
-                        cur_x.append(self.part_manifolds[k].expmap0(self.part_experts_norms[k](x[:,i])))
-                x_parts.append(cur_x)
-
+            x_parts = torch.stack(x_parts, dim=0)  # Final stack along the P dimension
+            
             del x
 
             proc_parts = self.part_experts(x_parts, selected_part_experts)
             
-            # Add + Norm aggregation
+            # Weighted mean aggregation in tangent space
             tan_cls_tokens_parts = []
-            for i in range(len(proc_parts)):
+            for p in range(P):
                 cur = []
-                for j, k in enumerate(selected_part_experts[i]):
+                weights = []
+                for j, k in enumerate(selected_part_experts[p]):
                     if self.part_manifolds[k].name == 'Euclidean':
-                        cur.append(proc_parts[i][j])
+                        cur.append(proc_parts[p][j])
                     else:
-                        cur.append(self.part_manifolds[k].logmap0(proc_parts[i][j]))
-                    
-                tan_cls_tokens_parts.append(torch.cat(cur, dim=-1))
-
+                        cur.append(self.part_manifolds[k].logmap0(proc_parts[p][j]))
+                    weights.append(part_router_output[p, k])
+                
+                weights = torch.softmax(torch.tensor(weights), dim=-1).unsqueeze(-1)
+                weighted_mean = torch.sum(torch.stack(cur) * weights, dim=0)
+                tan_cls_tokens_parts.append(weighted_mean)
+            
+            # CrossAttentionPooling for final aggregation
+            tan_cls_tokens_parts = torch.stack(tan_cls_tokens_parts, dim=0)
+            aggregated_output = self.part_tan_space_pooling(tan_cls_tokens_parts)
+            
             # Convert list to tensor
             tan_cls_tokens_parts = torch.stack(tan_cls_tokens_parts, dim=0)  # Batch x N x F
 
