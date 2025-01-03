@@ -26,9 +26,42 @@ def two_point_mid(x1,x2, man, w1,w2):
     return mid
 
 
- 
+def find_neighbors_knn(four_momentum_tensor, dists, index=None, k=5):
+    # Randomly select a point
+    num_points = four_momentum_tensor.shape[0]
+    if index is None:
+        index = random.randint(0, num_points - 1)
+    selected_point = four_momentum_tensor[index]
+    
+    # Find the indices of the k-nearest neighbors
+    neighbors_indices = torch.topk(dists[index], k, largest=False).indices
 
-class MoG_MLP(nn.Module):
+    neighbors = four_momentum_tensor[neighbors_indices]
+
+    return selected_point, neighbors, neighbors_indices
+
+
+class CrossAttentionPooling(nn.Module):
+    def __init__(self, embed_dim, num_heads=1):
+        super(CrossAttentionPooling, self).__init__()
+        self.attention = nn.MultiheadAttention(embed_dim, num_heads)
+        self.query = nn.Parameter(torch.randn(1, 1, embed_dim))
+
+    def forward(self, x, padding_mask=None):
+        """
+        x: Tensor of shape (seq_len, batch_size, embed_dim)
+        padding_mask: Tensor of shape (batch_size, seq_len)
+                      True indicates positions to be masked.
+        """
+        batch_size = x.size(1)
+        query = self.query.repeat(1, batch_size, 1)
+        
+        # Apply attention with padding mask
+        output, _ = self.attention(query, x, x, key_padding_mask=padding_mask)
+        
+        return output.squeeze(0)
+
+class MoG_part_lvl_MLP(nn.Module):
     
     def __init__(self,
                  input_dim,
@@ -51,6 +84,7 @@ class MoG_MLP(nn.Module):
                  top_k_jet = 2,
                  shared_expert = True, 
                  shared_expert_ratio = 2,
+                 all_k = [4, 8, 16],
                  num_heads=1,
                  num_layers=2,
                  num_cls_layers=2,
@@ -74,6 +108,15 @@ class MoG_MLP(nn.Module):
         total_part_dim = 0
         total_jet_dim = 0
         self.shared_expert = shared_expert
+
+        self.all_k = all_k
+        self.local_geom_pooling = nn.ModuleList(CrossAttentionPooling(part_experts_dim, 1) for _ in all_k)
+        
+            
+        
+        
+
+
 
         if activation == 'relu':
             self.activation = nn.ReLU()
@@ -176,6 +219,7 @@ class MoG_MLP(nn.Module):
 
         self.for_inference = for_inference
         self.use_amp = use_amp
+        self.trimmer = SequenceTrimmer(enabled=trim and not for_inference)
 
         # Particle MLP Experts
         mlp_input_dim = part_experts_dim
@@ -211,8 +255,7 @@ class MoG_MLP(nn.Module):
                                         nn.Linear(d1, d2), 
                                         self.activation,
                                         nn.Linear(d2, num_classes))
-        
-        
+
     @torch.jit.ignore
     def no_weight_decay(self):
         return {'cls_token', }
@@ -220,21 +263,85 @@ class MoG_MLP(nn.Module):
     def forward(self, x, v=None, mask=None, uu=None, uu_idx=None, embed = False):
         # N is batch size, P is particles, C is channels
         # x: (N, C, P)
+        # v: (N, 4, P) [px,py,pz,energy]
+        # mask: (N, 1, P) -- real particle = 1, padded = 0
+        # for pytorch: uu (N, C', num_pairs), uu_idx (N, 2, num_pairs)
+        # for onnx: uu (N, C', P, P), uu_idx=None
+        # print(x.shape)
         
-        with torch.cuda.amp.autocast(enabled=self.use_amp):     
+        with torch.cuda.amp.autocast(enabled=self.use_amp): 
+
+            with torch.no_grad():
+                if not self.for_inference:
+                    if uu_idx is not None:
+                        uu = build_sparse_tensor(uu, uu_idx, x.size(-1))
+                x, v, mask, uu = self.trimmer(x, v, mask, uu)
+                padding_mask = ~mask.squeeze(1)  # (N, P)    
             x = x.permute(2,0,1) # (N, C, P) -> (P, N, C)
-            
-            x_for_router = torch.mean(x,dim=0)
-            
-            # Router per jet
-            part_router_output = self.part_router(x_for_router)
+            v = v.permute(2,0,1) if v is not None else None  # (P, N, C)
+            local_geom_features = []
+            # Iterate over jets
+            for i in range(x.size(1)):
+                # Calculating interaction features for particle EMD
+                cur_v = v[:,i] if v is not None else None
+                cur_x = x[:,i]
+
+                part_energy = cur_v[:, 3] if v is not None else None  # (P, N)
+                part_pT = torch.norm(cur_v[:,:2], dim=-1) if v is not None else None  # (P, N)
+                part_eta = 0.5 * torch.log((part_pT + v[:, 2]) / (part_pT - cur_v[:, 2])) if v is not None else None  # (P, N)
+                part_phi = torch.atan2(cur_v[:, 1], cur_v[:, 0]) if v is not None else None  # (P, N)
+
+                # Compute pairwise energy differences |E_i - E_j|
+                energy_diffs = torch.abs(part_energy[:, None] - part_energy[None, :])
+
+                # Compute pairwise angular distances ΔR_ij = sqrt((η_i - η_j)^2 + (φ_i - φ_j)^2)
+                delta_eta = part_eta[:, None] - part_eta[None, :]
+                delta_phi = part_phi[:, None] - part_phi[None, :]
+
+                # Ensure phi differences wrap around correctly (handle 2pi periodicity)
+                delta_phi = torch.remainder(delta_phi + np.pi, 2 * np.pi) - np.pi
+
+                # Calculate ΔR
+                delta_R = torch.sqrt(delta_eta**2 + delta_phi**2)
+
+                # Calculate EMD-inspired distance: E_diff * ΔR / R (where R is a scale factor, e.g., jet radius)
+                R = 1  # Example jet radius
+                dists = (energy_diffs * delta_R) / R
+
+                
+                output = []
+                # Loop over all particles in the jet
+                for j in range(cur_v.size(0)):
+                    cur_output =[]
+                    cur_mask = padding_mask[j]
+                    is_zero_pad = cur_mask[j,j] == 0
+                    if is_zero_pad:
+                        output.append(torch.zeros(len(self.all_k)*self.part_experts_dim))
+                        continue
+                    else:
+                        for k_i, k in enumerate(self.all_k):
+                            # need to do something here for zero padding
+                            selected_point, neighbors, neighbors_indices = find_neighbors_knn(cur_v, dists, index=j, k=k)
+                            neighbor_mask = cur_mask[neighbors_indices,neighbors_indices]
+
+                            # Aggregate KNN using attention
+                            attention_aggregated_neighbors = self.local_geom_pooling[k_i](neighbors, padding_mask=neighbor_mask)
+                            cur_output.append(attention_aggregated_neighbors)
+                        # Stack aggregated local geometry features
+                        output.append(torch.cat(cur_output, dim=-1))
+                
+                local_geom_features.append(torch.stack(output, dim=0))
+            local_geom_features = torch.stack(local_geom_features, dim=1)
+                
+            # Router per particle
+            part_router_output = self.part_router(local_geom_features)
             selected_part_experts = torch.topk(part_router_output, self.top_k_part, dim = -1).indices
 
             # If shared expert, always route to index 0 and select remaining experts from 1 to n
             if self.shared_expert:
-                selected_part_experts = torch.cat((torch.zeros_like(selected_part_experts[:,0]).unsqueeze(-1),selected_part_experts+1),dim=-1)
+                selected_part_experts = torch.cat((torch.zeros_like(selected_part_experts[:,:,0]).unsqueeze(-1),selected_part_experts+1),dim=-1)
             
-            
+            print('selected_part_experts.shape:',selected_part_experts.shape)
             # Map input onto selected particle manifolds
             # x shape: (P, N, C)
 
