@@ -53,8 +53,12 @@ class CrossAttentionPooling(nn.Module):
         padding_mask: Tensor of shape (batch_size, seq_len)
                       True indicates positions to be masked.
         """
-        batch_size = x.size(1)
-        query = self.query.repeat(1, batch_size, 1)
+        
+        if len(x.size()) == 2:
+            query = self.query.squeeze(0)
+        else:
+            batch_size = x.size(1)
+            query = self.query.repeat(1, batch_size, 1)
         
         # Apply attention with padding mask
         output, _ = self.attention(query, x, x, key_padding_mask=padding_mask)
@@ -112,7 +116,7 @@ class MoG_part_lvl_MLP(nn.Module):
         self.jet_expert_dim = jet_experts_dim
 
         self.all_k = all_k
-        self.local_geom_pooling = nn.ModuleList(CrossAttentionPooling(part_experts_dim, 1) for _ in all_k)
+        self.local_geom_pooling = nn.ModuleList(CrossAttentionPooling(4, 1) for _ in all_k)
         
         part_pooling_dim = part_experts_dim
 
@@ -294,12 +298,14 @@ class MoG_part_lvl_MLP(nn.Module):
             if self.shared_expert:
                 K += 1
             
-            # Iterate over jets
+            # Iterate over batch
             for i in range(x.size(1)):
                 # Calculating interaction features for particle EMD
                 cur_v = v[:,i] if v is not None else None
                 cur_x = x[:,i]
                 cur_mask = padding_mask[i]
+
+                print('cur_x.shape:',cur_x.shape)
 
                 part_energy = cur_v[:, 3] if v is not None else None  # (P, N)
                 part_pT = torch.norm(cur_v[:,:2], dim=-1) if v is not None else None  # (P, N)
@@ -337,10 +343,16 @@ class MoG_part_lvl_MLP(nn.Module):
                         for k_i, k in enumerate(self.all_k):
                             # need to do something here for zero padding
                             selected_point, neighbors, neighbors_indices = find_neighbors_knn(cur_v, dists, index=j, k=k)
-                            neighbor_mask = cur_mask[neighbors_indices,neighbors_indices]
+                            neighbor_mask = cur_mask[neighbors_indices]
 
+                            # neighbors = neighbors.unsqueeze(0)
+                            # neighbor_mask = neighbor_mask.unsqueeze(1)
                             # Aggregate KNN using attention
+                            print('neighbors.shape',neighbors.shape)
+                            print('neighbor_mask.shape',neighbor_mask.shape)
+
                             attention_aggregated_neighbors = self.local_geom_pooling[k_i](neighbors, padding_mask=neighbor_mask)
+                            print('attention_aggregated_neighbors.shape',attention_aggregated_neighbors.shape)
                             cur_output.append(attention_aggregated_neighbors)
                         # Stack aggregated local geometry features
                         output.append(torch.cat(cur_output, dim=-1))
