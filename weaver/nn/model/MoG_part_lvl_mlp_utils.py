@@ -78,15 +78,21 @@ class PM_MoE_part_lvl_MLP_Block(nn.Module):
                     for k in range(K):
                         if expert_idx == selected_experts[p, i, k]:
                             batch_elements.append(x_parts[p, i, k].unsqueeze(0))
-                            batch_indices.append((p, i))
+                            batch_indices.append((p, i, k))
             
             if batch_elements:
-                batch_elements = torch.cat(batch_elements, dim=0)
-                expert_outputs = expert(batch_elements)
+                batch_elements = torch.cat(batch_elements, dim=0)  # Shape [batch_size, F]
+                expert_outputs = expert(batch_elements)  # Expect [batch_size, output_dim]
                 
-                for (p, i), output in zip(batch_indices, expert_outputs):
-                    outputs[p].append(output)
+                if expert_outputs.dim() == 1:
+                    expert_outputs = expert_outputs.unsqueeze(-1)  # Shape [batch_size, 1]
+                
+                for (p, i, k), output in zip(batch_indices, expert_outputs):
+                    if len(outputs[p]) <= i:
+                        outputs[p].append([])
+                    outputs[p][i].append(output)  # Append directly to preserve varying sizes
         
-        return outputs
+        return outputs  # Return list of lists of tensors with varying feature sizes
+
 
 
