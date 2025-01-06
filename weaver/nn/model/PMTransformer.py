@@ -462,35 +462,46 @@ class PMBlock(nn.Module):
             self.res_agg.append(Mob_Res_Midpoint(man))
             
             if act is not None:
-                self.fc1.append(nn.Sequential(Manifold_Linear(embed_dim, self.ffn_dim,ball = man, weight_init_ratio = weight_init_ratio), act))
-                self.fc2.append(nn.Sequential(Manifold_Linear(self.ffn_dim, embed_dim,ball = man, weight_init_ratio = weight_init_ratio), act))
+                if man.name == 'Euclidean':
+                    self.fc1.append(nn.Sequential(nn.Linear(embed_dim, self.ffn_dim), act))
+                    self.fc2.append(nn.Sequential(nn.Linear(self.ffn_dim, embed_dim), act))
+                else:
+                    self.fc1.append(nn.Sequential(Manifold_Linear(embed_dim, self.ffn_dim,ball = man, weight_init_ratio = weight_init_ratio), act))
+                    self.fc2.append(nn.Sequential(Manifold_Linear(self.ffn_dim, embed_dim,ball = man, weight_init_ratio = weight_init_ratio), act))
             else:
-                self.fc1.append(nn.Sequential(Manifold_Linear(embed_dim, self.ffn_dim,ball = man, weight_init_ratio = weight_init_ratio)
-                                              ))
-                self.fc2.append(nn.Sequential(Manifold_Linear(self.ffn_dim, embed_dim,ball = man, weight_init_ratio = weight_init_ratio)))
+
+                if man.name == 'Euclidean':
+                    self.fc1.append(nn.Sequential(nn.Linear(embed_dim, self.ffn_dim)))
+                    self.fc2.append(nn.Sequential(nn.Linear(self.ffn_dim, embed_dim)))
+                else:
+                    self.fc1.append(nn.Sequential(Manifold_Linear(embed_dim, self.ffn_dim,ball = man, weight_init_ratio = weight_init_ratio)))
+                    self.fc2.append(nn.Sequential(Manifold_Linear(self.ffn_dim, embed_dim,ball = man, weight_init_ratio = weight_init_ratio)))
             
             self.attn.append(ManifoldMHA(embed_dim,num_heads,dropout=attn_dropout, ball = man, weight_init_ratio = weight_init_ratio,att_metric = att_metric))
             
             if self.man_att and self.n_man > 1:
-                
-                if inter_man_att_method == 'v1':
-                    self.w_man_att.append(Manifold_Linear(embed_dim, self.man_att_dim ,ball = man))
-                    self.theta_man_att.append(nn.Linear(self.man_att_dim, 1))
-                elif inter_man_att_method == 'v2':
-                    self.w_man_att.append(Manifold_Linear(embed_dim, embed_dim ,ball = man))
-                elif inter_man_att_method == 'v3':
-                    self.w_man_att.append(Manifold_Linear(embed_dim, embed_dim ,ball = man))
+                if man.name == 'Euclidean':
+                    if inter_man_att_method == 'v1':
+                        self.w_man_att.append(nn.Linear(embed_dim, self.man_att_dim))
+                        self.theta_man_att.append(nn.Linear(self.man_att_dim, 1))
+                    elif inter_man_att_method == 'v2':
+                        self.w_man_att.append(nn.Linear(embed_dim, embed_dim))
+                    elif inter_man_att_method == 'v3':
+                        self.w_man_att.append(nn.Linear(embed_dim, embed_dim))
+                else:
+                    if inter_man_att_method == 'v1':
+                        self.w_man_att.append(Manifold_Linear(embed_dim, self.man_att_dim , ball = man))
+                        self.theta_man_att.append(Manifold_Linear(self.man_att_dim, 1, ball = man))
+                    elif inter_man_att_method == 'v2':
+                        self.w_man_att.append(Manifold_Linear(embed_dim, embed_dim ,ball = man))
+                    elif inter_man_att_method == 'v3':
+                        self.w_man_att.append(Manifold_Linear(embed_dim, embed_dim ,ball = man))
+                    
+
                                               
             
-            if man.name == 'Euclidean':
-                self.pre_attn_norm.append(nn.LayerNorm(embed_dim))
-                self.pre_fc_norm.append(nn.LayerNorm(embed_dim))
-            elif 'Poincare' in man.name:
-                self.pre_attn_norm.append(nn.LayerNorm(embed_dim))
-                self.pre_fc_norm.append(nn.LayerNorm(embed_dim))
-            else:
-                self.pre_attn_norm.append(nn.LayerNorm(embed_dim))
-                self.pre_fc_norm.append(nn.LayerNorm(embed_dim))
+            self.pre_attn_norm.append(nn.LayerNorm(embed_dim))
+            self.pre_fc_norm.append(nn.LayerNorm(embed_dim))
             
 
     def forward(self,  pm_x, pm_x_cls=None, padding_mask=None, attn_mask=None):
@@ -681,6 +692,8 @@ class PMTransformer(nn.Module):
         
         self.conv_embed = conv_embed  =='True'
         self.clamp = clamp
+
+        # print('input_dim', input_dim)
         
         embed_dims = [part_dim, part_dim, part_dim]
         fc_params = [[jet_dim,0.1], [jet_dim,0.1], [jet_dim,0.1]]
@@ -760,6 +773,8 @@ class PMTransformer(nn.Module):
         self.pair_extra_dim = pair_extra_dim
         if conv_embed:
             self.embed = Embed(input_dim, embed_dims, activation=activation) if len(embed_dims) > 0 else nn.Identity()
+            input_dim = embed_dims[-1]
+            print('new input_dim', input_dim)
         self.pair_embed = PairEmbed(
             pair_input_dim, pair_extra_dim, pair_embed_dims + [cfg_block['num_heads']],
             remove_self_pair=remove_self_pair, use_pre_activation_pair=use_pre_activation_pair,
@@ -767,7 +782,11 @@ class PMTransformer(nn.Module):
         
         self.part_embedding = nn.ModuleList()
         for man in self.part_manifolds:
-            self.part_embedding.append(nn.Sequential(Manifold_Linear(input_dim, part_dim, ball = man,weight_init_ratio = PM_weight_initialization_factor)))
+            if man.name == 'Euclidean':
+                
+                self.part_embedding.append(nn.Sequential(nn.Linear(input_dim, part_dim)))
+            else:
+                self.part_embedding.append(nn.Sequential(Manifold_Linear(input_dim, part_dim, ball = man,weight_init_ratio = PM_weight_initialization_factor)))
         self.blocks = nn.ModuleList()
         for i in range(num_layers):
             
@@ -817,19 +836,38 @@ class PMTransformer(nn.Module):
                             nn.ReLU()))
                 
                 if act is not None :
-                    self.jet_man_fc.append(nn.Sequential(
-                        Manifold_Linear(jet_dim, jet_dim, ball=man, weight_init_ratio=PM_weight_initialization_factor), 
-                        act,
-                        Manifold_Linear(jet_dim, jet_dim, ball=man, weight_init_ratio=PM_weight_initialization_factor)
-                    ))
+                    if man.name == 'Euclidean':
+                        self.jet_man_fc.append(nn.Sequential(
+                            nn.Linear(jet_dim, jet_dim), 
+                            act,
+                            nn.Linear(jet_dim, jet_dim)
+                        ))
+                    else:
+                        self.jet_man_fc.append(nn.Sequential(
+                            Manifold_Linear(jet_dim, jet_dim, ball=man, weight_init_ratio=PM_weight_initialization_factor), 
+                            act,
+                            Manifold_Linear(jet_dim, jet_dim, ball=man, weight_init_ratio=PM_weight_initialization_factor)
+                        ))
                 else:
-                    self.jet_man_fc.append(nn.Sequential(
-                        Manifold_Linear(jet_dim, jet_dim, ball=man, weight_init_ratio=PM_weight_initialization_factor),
-                        Manifold_Linear(jet_dim, jet_dim, ball=man, weight_init_ratio=PM_weight_initialization_factor)
-                    ))
+                    if man.name == 'Euclidean':
+                        self.jet_man_fc.append(nn.Sequential(
+                            nn.Linear(jet_dim, jet_dim), 
+                           
+                            nn.Linear(jet_dim, jet_dim)
+                        ))
+                    else:
+                        self.jet_man_fc.append(nn.Sequential(
+                            Manifold_Linear(jet_dim, jet_dim, ball=man, weight_init_ratio=PM_weight_initialization_factor), 
+                          
+                            Manifold_Linear(jet_dim, jet_dim, ball=man, weight_init_ratio=PM_weight_initialization_factor)
+                        ))
                 if self.n_jet_man > 1:
-                    self.w_man_att_jet.append(Manifold_Linear(jet_dim, jet_dim ,ball = man))
-                
+                    if man.name == 'Euclidean':
+                        self.w_man_att_jet.append(nn.Linear(jet_dim, jet_dim))
+                    else:
+                        self.w_man_att_jet.append(Manifold_Linear(jet_dim, jet_dim ,ball = man))
+
+
             post_jet_dim = self.n_jet_man * jet_dim
             self.final_fc = nn.Sequential(nn.Linear(post_jet_dim, post_jet_dim), nn.ReLU(),
                                           nn.Linear(post_jet_dim, post_jet_dim), nn.ReLU(),
@@ -841,6 +879,8 @@ class PMTransformer(nn.Module):
         # init
         self.cls_token = nn.ParameterList()
         for man in self.part_manifolds:
+            if man.name == 'Euclidean':
+                cur_token = nn.Parameter(torch.zeros(1, 1, embed_dim), requires_grad=True)
             cur_token = geoopt.ManifoldParameter(torch.zeros(1, 1, embed_dim), requires_grad=True, manifold = man)
             trunc_normal_(cur_token, std=.02)
             self.cls_token.append(cur_token)
@@ -858,6 +898,7 @@ class PMTransformer(nn.Module):
         # mask: (N, 1, P) -- real particle = 1, padded = 0
         # for pytorch: uu (N, C', num_pairs), uu_idx (N, 2, num_pairs)
         # for onnx: uu (N, C', P, P), uu_idx=None
+        # print('x',x.shape)
         
         
         
@@ -870,7 +911,7 @@ class PMTransformer(nn.Module):
         with torch.cuda.amp.autocast(enabled=self.use_amp):
             if self.conv_embed:
                 x = self.embed(x).masked_fill(~mask.permute(2, 0, 1), 0)  # (P, N, C)
-            x =x.permute(2,0, 1)
+            # x =x.permute(2,0, 1)
             attn_mask = None
             if (v is not None or uu is not None) and self.pair_embed is not None:
                 attn_mask = self.pair_embed(v, uu).view(-1, v.size(-1), v.size(-1))  # (N*num_heads, P, P)
@@ -882,7 +923,9 @@ class PMTransformer(nn.Module):
                 cls_tokens = self.cls_token[i].expand(1, x.size(1), -1)
                 if self.clamp > 1 and 'Poincare' in man.name:
                     x = torch.clamp(self.clamp/x.norm(dim=1), max = 1)*x
+                # print('x.shape',x.shape)
                 x_parts.append(self.part_embedding[i](man.expmap0(x)))
+                # print('self.part_embedding[i](man.expmap0(x))',self.part_embedding[i](man.expmap0(x)).shape)
                 cls_tokens_parts.append(cls_tokens)
            
 

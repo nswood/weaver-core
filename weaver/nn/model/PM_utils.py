@@ -70,25 +70,19 @@ class Manifold_Linear(nn.Module):
         self.weight = nn.parameter.Parameter(torch.Tensor(out_features,in_features,))
         
 #         self.weight = geoopt.ManifoldParameter(torch.Tensor(out_features,in_features,),manifold=self.ball)
-        self.__params__ = self.in_features* self.out_features
-        if bias: 
-            self.__params__ += self.out_features
+        self.__params__ = self.in_features* self.out_features        
         
         if bias:
-            self.bias = geoopt.ManifoldParameter(torch.Tensor(out_features),manifold=self.ball)
+            self.bias = geoopt.ManifoldParameter(torch.Tensor(out_features), manifold=self.ball)
+            self.__params__ += out_features
         else:
             self.register_parameter("bias", None)
         self.reset_parameters()
         
     
     def reset_parameters(self):
-        if self.ball.name == 'Euclidean':
-            init.kaiming_uniform_(self.weight, a=0.001* self.weight_init_ratio)
-        else:
-            # want to pass in ratio for a 
-#             init.kaiming_uniform_(self.weight, a=0.00001)
-            init.kaiming_uniform_(self.weight, a=0.001 * self.weight_init_ratio)
-            
+        
+        init.kaiming_uniform_(self.weight, a=0.001 * self.weight_init_ratio)
             
         if self.bias is not None:
             fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
@@ -97,11 +91,12 @@ class Manifold_Linear(nn.Module):
 
     def forward(self, x):
         
-        mv = self.ball.mobius_matvec(self.weight,x)
+        mv = self.ball.mobius_matvec(self.weight, x)
         
-        if not self.bias is None:
+        if self.bias is not None:
             mv = self.ball.mobius_add(mv, self.bias)
         return self.ball.projx(mv)
+
 
     def extra_repr(self):
         return "in_features={}, out_features={}, bias={}, c={}".format(
@@ -126,10 +121,15 @@ class ManifoldMHA(nn.Module):
         self.att_metric = att_metric
         
 #         print(att_metric)
-        
-        self.query = Manifold_Linear(hidden_size, hidden_size, ball=self.ball, weight_init_ratio = weight_init_ratio)
-        self.key = Manifold_Linear(hidden_size, hidden_size, ball=self.ball, weight_init_ratio = weight_init_ratio)
-        self.value = Manifold_Linear(hidden_size, hidden_size, ball=self.ball, weight_init_ratio = weight_init_ratio)
+        if ball.name == 'Euclidean':
+            self.query = nn.Linear(hidden_size, hidden_size)
+            self.key = nn.Linear(hidden_size, hidden_size)
+            self.value = nn.Linear(hidden_size, hidden_size)
+
+        else:
+            self.query = Manifold_Linear(hidden_size, hidden_size, ball=self.ball, weight_init_ratio = weight_init_ratio)
+            self.key = Manifold_Linear(hidden_size, hidden_size, ball=self.ball, weight_init_ratio = weight_init_ratio)
+            self.value = Manifold_Linear(hidden_size, hidden_size, ball=self.ball, weight_init_ratio = weight_init_ratio)
 
         self.dropout = nn.Dropout(dropout)
         self.sigmoid_fn = nn.Sigmoid()
