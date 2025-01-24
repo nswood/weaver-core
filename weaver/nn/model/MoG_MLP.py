@@ -33,6 +33,8 @@ class MoG_MLP(nn.Module):
     def __init__(self,
                  input_dim,
                  num_classes=None,
+                 particle_classification=False,
+                 jet_classification=True,
                  # network configurations
                  pair_input_dim=4,
                  pair_extra_dim=0,
@@ -75,6 +77,9 @@ class MoG_MLP(nn.Module):
         total_jet_dim = 0
         self.shared_expert = shared_expert
 
+        self.particle_classification = particle_classification
+        self.jet_classification = jet_classification
+
         if activation == 'relu':
             self.activation = nn.ReLU()
 
@@ -106,6 +111,11 @@ class MoG_MLP(nn.Module):
             self.jet_manifolds.append(geoopt.StereographicExact(learnable=learnable, k = jet_expert_curvature_init[i]))
 
         total_jet_dim += top_k_jet*jet_experts_dim
+        
+        part_pooling_dim = part_experts_dim
+
+        if shared_expert:
+            part_pooling_dim += part_experts_dim * shared_expert_ratio
         
         print('Particle Manifolds:')
         print('====================')
@@ -151,20 +161,21 @@ class MoG_MLP(nn.Module):
                                     self.activation,
                                     nn.Linear(d1, part_experts),
                                     nn.Softmax(dim = -1))
-        
-        # Jet Router
-        jet_router_input = total_part_dim
-        dim_dif = jet_router_input - jet_experts_dim
-        d1 = jet_router_input - int(dim_dif*0.5)
-        self.jet_router = nn.Sequential(nn.Linear(jet_router_input, d1),
-                                        self.activation,
-                                        nn.Linear(d1, jet_experts),
-                                        nn.Softmax(dim = -1))
+        if self.jet_classification:
+            # Jet Router
+            jet_router_input = total_part_dim
+            dim_dif = jet_router_input - jet_experts_dim
+            d1 = jet_router_input - int(dim_dif*0.5)
+            self.jet_router = nn.Sequential(nn.Linear(jet_router_input, d1),
+                                            self.activation,
+                                            nn.Linear(d1, jet_experts),
+                                            nn.Softmax(dim = -1))
         
         # Normalization Layers
         self.part_experts_norms = nn.ModuleList(nn.RMSNorm(input_dim) for i in range(self.n_part_experts))
-        self.jet_experts_norms = nn.ModuleList(nn.RMSNorm(total_part_dim) for i in range(self.n_jet_experts))
-
+        if self.jet_classification:
+            self.jet_experts_norms = nn.ModuleList(nn.RMSNorm(total_part_dim) for i in range(self.n_jet_experts))
+    
 
         self.norm1 = nn.RMSNorm(total_part_dim)
         if shared_expert:
@@ -189,28 +200,39 @@ class MoG_MLP(nn.Module):
                                             ffn_ratio = ffn_ratio)
         
         # Jet MLP Experts
-        mlp_input_dim = part_experts_dim
-        self.jet_experts = PM_MoE_MLP_Block(manifolds = self.jet_manifolds,
-                                            input_dim=total_part_dim, 
-                                            output_dim=jet_experts_dim, 
-                                            num_experts=jet_experts, 
-                                            top_k=top_k_jet, 
-                                            shared_expert_ratio=shared_expert_ratio,
-                                            shared_expert=shared_expert,
-                                            ffn_ratio = ffn_ratio)
-        
-        if shared_expert:
-            post_jet_dim = self.jet_shared_expert_dim
-        else:
-            post_jet_dim = jet_experts_dim
-        dim_dif = post_jet_dim - num_classes
-        d1 = post_jet_dim - int(dim_dif*0.5)
-        d2 = d1 - int(dim_dif*0.25)
-        self.final_fc = nn.Sequential(nn.Linear(post_jet_dim, d1), 
-                                        self.activation,
-                                        nn.Linear(d1, d2), 
-                                        self.activation,
-                                        nn.Linear(d2, num_classes))
+        if self.jet_classification:
+            mlp_input_dim = part_experts_dim
+            self.jet_experts = PM_MoE_MLP_Block(manifolds = self.jet_manifolds,
+                                                input_dim=total_part_dim, 
+                                                output_dim=jet_experts_dim, 
+                                                num_experts=jet_experts, 
+                                                top_k=top_k_jet, 
+                                                shared_expert_ratio=shared_expert_ratio,
+                                                shared_expert=shared_expert,
+                                                ffn_ratio = ffn_ratio)
+        if self.jet_classification:
+            if shared_expert:
+                post_jet_dim = self.jet_shared_expert_dim
+            else:
+                post_jet_dim = jet_experts_dim
+            dim_dif = post_jet_dim - num_classes
+            d1 = post_jet_dim - int(dim_dif*0.5)
+            d2 = d1 - int(dim_dif*0.25)
+            self.final_fc = nn.Sequential(nn.Linear(post_jet_dim, d1), 
+                                            self.activation,
+                                            nn.Linear(d1, d2), 
+                                            self.activation,
+                                            nn.Linear(d2, num_classes))
+        elif self.particle_classification:
+            
+            dim_dif = part_pooling_dim - num_classes
+            d1 = part_pooling_dim - int(dim_dif*0.5)
+            d2 = d1 - int(dim_dif*0.25)
+            self.final_fc = nn.Sequential(nn.Linear(part_pooling_dim, d1), 
+                                            self.activation,
+                                            nn.Linear(d1, d2), 
+                                            self.activation,
+                                            nn.Linear(d2, num_classes))
         
         
     @torch.jit.ignore
@@ -248,7 +270,7 @@ class MoG_MLP(nn.Module):
                         cur_x.append(self.part_manifolds[k].expmap0(self.part_experts_norms[k](x[:,i])))
                 x_parts.append(cur_x)
 
-            del x
+            
 
             proc_parts = self.part_experts(x_parts, selected_part_experts)
             
@@ -256,16 +278,25 @@ class MoG_MLP(nn.Module):
             tan_cls_tokens_parts = []
             for i in range(len(proc_parts)):
                 cur = []
+                
                 for j, k in enumerate(selected_part_experts[i]):
                     if self.part_manifolds[k].name == 'Euclidean':
-                        cur.append(proc_parts[i][j])
+                        shared_expert_cur = proc_parts[i][j]
                     else:
                         cur.append(self.part_manifolds[k].logmap0(proc_parts[i][j]))
-                    
-                tan_cls_tokens_parts.append(torch.cat(cur, dim=-1))
+                temp = torch.stack(cur, dim=1)  # K x P x F
+                mean_agg = torch.mean(temp, dim=1).to(x.device)  # P x F
+                if self.shared_expert:
+                    mean_agg = torch.cat((mean_agg, shared_expert_cur), dim=-1)
+                tan_cls_tokens_parts.append(mean_agg)
 
             # Convert list to tensor
             tan_cls_tokens_parts = torch.stack(tan_cls_tokens_parts, dim=0)  # Batch x N x F
+            if self.particle_classification:
+                output = self.final_fc(tan_cls_tokens_parts), part_router_output
+                if self.for_inference:
+                    output = torch.softmax(output, dim=1)
+                return output
 
             # Add and norm over N
             tan_cls_tokens_parts = torch.sum(tan_cls_tokens_parts, dim=1)  # Batch x F
