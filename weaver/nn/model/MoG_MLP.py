@@ -71,6 +71,7 @@ class MoG_MLP(nn.Module):
                  
                  **kwargs) -> None:
         super().__init__(**kwargs)
+        self.name = 'MoG_MLP'
         self.part_manifolds = nn.ModuleList()
         self.jet_manifolds = nn.ModuleList()
         total_part_dim = 0
@@ -129,17 +130,17 @@ class MoG_MLP(nn.Module):
         print('==================== \n\n')
 
         
-        
-        print('Jet Manifolds:')
-        print('====================')
-        print('====================')
-        for i,man in enumerate(self.jet_manifolds):
-            if man.name == 'Euclidean':
-                print('Euclidean Manifold',i)
-            else:
-                print('Stereographic Manifold:',i, 'Curvature:',man.k)
-        print('====================')
-        print('====================')
+        if self.jet_classification:
+            print('Jet Manifolds:')
+            print('====================')
+            print('====================')
+            for i,man in enumerate(self.jet_manifolds):
+                if man.name == 'Euclidean':
+                    print('Euclidean Manifold',i)
+                else:
+                    print('Stereographic Manifold:',i, 'Curvature:',man.k)
+            print('====================')
+            print('====================')
 
         self.top_k_part = top_k_part
         self.top_k_jet = top_k_jet

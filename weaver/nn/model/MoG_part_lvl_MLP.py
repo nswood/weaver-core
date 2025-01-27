@@ -109,6 +109,7 @@ class MoG_part_lvl_MLP(nn.Module):
                  
                  **kwargs) -> None:
         super().__init__(**kwargs)
+        self.name = 'MoG_part_lvl_MLP'
         self.jet_classification = jet_classification
         self.particle_classification = particle_classification
         self.part_manifolds = nn.ModuleList()
@@ -289,7 +290,7 @@ class MoG_part_lvl_MLP(nn.Module):
     def no_weight_decay(self):
         return {'cls_token', }
 
-    def forward(self, x, v=None, mask=None, uu=None, uu_idx=None, embed = False):
+    def forward(self, x, v=None,neighbor_indices = None,  mask=None, uu=None, uu_idx=None, embed = False):
         # N is batch size, P is particles, C is channels
         # x: (N, C, P)
         # v: (N, 4, P) [px,py,pz,energy]
@@ -309,6 +310,8 @@ class MoG_part_lvl_MLP(nn.Module):
             x = x.permute(2,0,1) # (N, C, P) -> (P, N, C)
             v = v.permute(2,0,1) if v is not None else None  # (P, N, C)
             local_geom_features = []
+            print('neighbor_indices.shape:',neighbor_indices.shape)
+
             
             P, N, C = x.size()
             K =  self.top_k_part
