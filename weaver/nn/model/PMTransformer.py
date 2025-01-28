@@ -421,6 +421,8 @@ class PMBlock(nn.Module):
         self.num_heads = num_heads
         # self.head_dim = [cur_embed_dim // num_heads for cur_embed_dim in embed_dim]
         self.ffn_dim = embed_dim * ffn_ratio
+
+        self.max_embed_dim = max(embed_dim)
         
         self.inter_man_att_method = inter_man_att_method
         self.base_resid_agg = base_resid_agg
@@ -445,7 +447,7 @@ class PMBlock(nn.Module):
             
         if inter_man_att_method == 'v3':
             # Takes all reps in tangent space as input and outputs weights
-            all_embed_dim = sum(embed_dim)
+            all_embed_dim = self.max_embed_dim * self.n_man
             self.midpoint_weighting = nn.Sequential(nn.Linear(all_embed_dim, int(4*self.n_man)),
                                                     nn.ReLU(),
                                                     nn.Linear(int(4*self.n_man), self.n_man),
@@ -598,6 +600,12 @@ class PMBlock(nn.Module):
                 
                 tan_output = [self.manifolds[i].logmap0(output[i]) for i in range(self.n_man)]
                 
+                for idx, cur_tan_output in enumerate(tan_output):
+                    if cur_tan_output.shape[-1] != self.max_embed_dim:
+                        padding = torch.zeros(cur_tan_output.shape[:-1] + (self.max_embed_dim - cur_tan_output.shape[-1],), device=cur_tan_output.device)
+                        tan_output[idx] = torch.cat((cur_tan_output, padding), dim=-1)
+
+                
                 mu_stacked = torch.stack(tan_output)
                 
                 # Learnable weights between manifolds
@@ -618,13 +626,16 @@ class PMBlock(nn.Module):
                 mu = mu.squeeze(0)
                 
                 # Project midpoints and process 
-                proj_mu = [self.w_man_att[i](self.manifolds[i].expmap0(mu)) for i in range(self.n_man)]
-                                
+                proj_mu = [self.w_man_att[i](self.manifolds[i].expmap0(mu[:,:,0:self.embed_dim[i]])) for i in range(self.n_man)]
+                # for p in proj_mu:
+                #     print('proj_mu entry', p.shape)
+                
                 
                 # distance between x_i and mu projected onto M_i
                 d_i = []
                 for i in range(self.n_man):
                     if self.manifolds[i].name =='Euclidean':
+                        
                         d_i.append(torch.norm(output[i]-proj_mu[i],dim=-1))
                     else:
                         d_i.append(self.manifolds[i].dist(output[i],proj_mu[i]))
