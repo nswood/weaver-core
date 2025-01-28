@@ -693,23 +693,23 @@ class PMTransformer(nn.Module):
         parts = part_geom.split('x') if 'x' in part_geom else [part_geom]
         jets = jet_geom.split('x') if 'x' in jet_geom else [jet_geom]
 
-        print('part_dim', part_dim)
-        print('jet_dim', jet_dim)
-        print('part_curvature_init', part_curvature_init)
-        print('jet_curvature_init', jet_curvature_init)
+        # print('part_dim', part_dim)
+        # print('jet_dim', jet_dim)
+        # print('part_curvature_init', part_curvature_init)
+        # print('jet_curvature_init', jet_curvature_init)
 
-        print('part_dim type', type(part_dim))
-        print('jet_dim type', type(jet_dim))
-        print('part_curvature_init type', type(part_curvature_init))
-        print('jet_curvature_init type', type(jet_curvature_init))
+        # print('part_dim type', type(part_dim))
+        # print('jet_dim type', type(jet_dim))
+        # print('part_curvature_init type', type(part_curvature_init))
+        # print('jet_curvature_init type', type(jet_curvature_init))
 
         part_dim = [int(x) for x in part_dim.split(',')]
         jet_dim = [int(x) for x in jet_dim.split(',')]
         
         
-        part_curvature_init = [float(x) for x in part_curvature_init]
+        part_curvature_init = [float(x) for x in part_curvature_init.split(',')]
         
-        jet_curvature_init = [float(x) for x in jet_curvature_init]
+        jet_curvature_init = [float(x) for x in jet_curvature_init.split(',')]
         
         self.conv_embed = conv_embed  =='True'
         self.clamp = clamp
@@ -717,6 +717,7 @@ class PMTransformer(nn.Module):
         # print('input_dim', input_dim)
         min_part_dim = min(part_dim)
         embed_dims = [min_part_dim, min_part_dim, min_part_dim]
+        # print('embed_dims', embed_dims)
         fc_params = [[jet_dim,0.1], [jet_dim,0.1], [jet_dim,0.1]]
 
         for i, m in enumerate(parts):
@@ -760,12 +761,14 @@ class PMTransformer(nn.Module):
         self.base_activations = base_activations
         self.remove_pm_norm_layers = remove_pm_norm_layers
 
-        embed_dim = part_dim
+        embed_dim = min(part_dim)
+
+        self.input_norm = nn.LayerNorm(input_dim)
     
         if equal_heads and self.n_part_man > 1: 
             num_heads = int(num_heads/self.n_part_man)
             
-        default_cfg = dict(embed_dim=embed_dim, 
+        default_cfg = dict(embed_dim=part_dim, 
                            num_heads=num_heads, 
                            ffn_ratio=1,
                            dropout=dropout_rate, 
@@ -787,7 +790,7 @@ class PMTransformer(nn.Module):
                            remove_pm_norm_layers = remove_pm_norm_layers)
         
         cfg_block = copy.deepcopy(default_cfg)
-        
+        # print('original input_dim', input_dim)
         if block_params is not None:
             cfg_block.update(block_params)
         _logger.info('cfg_block: %s' % str(cfg_block))
@@ -802,7 +805,7 @@ class PMTransformer(nn.Module):
         if conv_embed:
             self.embed = Embed(input_dim, embed_dims, activation=activation) if len(embed_dims) > 0 else nn.Identity()
             input_dim = embed_dims[-1]
-            print('new input_dim', input_dim)
+            # print('new input_dim', input_dim)
         self.pair_embed = PairEmbed(
             pair_input_dim, pair_extra_dim, pair_embed_dims + [cfg_block['num_heads']],
             remove_self_pair=remove_self_pair, use_pre_activation_pair=use_pre_activation_pair,
@@ -810,6 +813,9 @@ class PMTransformer(nn.Module):
         
         self.part_embedding = nn.ModuleList()
         for i, man in enumerate(self.part_manifolds):
+            # print('Manifold', man.name)
+            # print('Part_dim[i]', part_dim[i])
+            # print('input_dim', input_dim)
             if man.name == 'Euclidean':
                 
                 self.part_embedding.append(nn.Sequential(nn.Linear(input_dim, part_dim[i])))
@@ -912,9 +918,9 @@ class PMTransformer(nn.Module):
         self.cls_token = nn.ParameterList()
         for i, man in enumerate(self.part_manifolds):
             if man.name == 'Euclidean':
-                cur_token = nn.Parameter(torch.zeros(1, 1, embed_dim[i]), requires_grad=True)
+                cur_token = nn.Parameter(torch.zeros(1, 1, part_dim[i]), requires_grad=True)
             else:
-                cur_token = geoopt.ManifoldParameter(torch.zeros(1, 1, embed_dim[i]), requires_grad=True, manifold = man)
+                cur_token = geoopt.ManifoldParameter(torch.zeros(1, 1, part_dim[i]), requires_grad=True, manifold = man)
             trunc_normal_(cur_token, std=.02)
             self.cls_token.append(cur_token)
         
@@ -931,7 +937,7 @@ class PMTransformer(nn.Module):
         # mask: (N, 1, P) -- real particle = 1, padded = 0
         # for pytorch: uu (N, C', num_pairs), uu_idx (N, 2, num_pairs)
         # for onnx: uu (N, C', P, P), uu_idx=None
-        # print('x',x.shape)
+        # print('input x.shape',x.shape)
         
         
         
@@ -945,12 +951,17 @@ class PMTransformer(nn.Module):
         with torch.cuda.amp.autocast(enabled=self.use_amp):
             if self.conv_embed:
                 x = self.embed(x).masked_fill(~mask.permute(2, 0, 1), 0)  # (P, N, C)
-            # x =x.permute(2,0, 1)
+            x =x.permute(2,0, 1)
+            
+            if not self.conv_embed:
+                x = self.input_norm(x)
+
+            
             attn_mask = None
             if (v is not None or uu is not None) and self.pair_embed is not None:
                 attn_mask = self.pair_embed(v, uu).view(-1, v.size(-1), v.size(-1))  # (N*num_heads, P, P)
             
-            
+            # print('x.shape', x.shape)
             x_parts = []
             cls_tokens_parts = []
             for i,man in enumerate(self.part_manifolds):
@@ -999,7 +1010,7 @@ class PMTransformer(nn.Module):
             if self.clamp > 1:
                 for i,man in enumerate(self.jet_manifolds):
                     if 'Poincare' in man.name:
-                        print('jet clamp')
+                        # print('jet clamp')
                         x_jets[i] = torch.clamp(self.clamp/x_jets[i].norm(dim=1), max = 1)*x_jets[i]
             
             # Map to Jet Manifold

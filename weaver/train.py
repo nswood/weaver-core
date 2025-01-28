@@ -668,7 +668,7 @@ def model_setup(args, data_config, device='cpu'):
     
 
     
-    filtered_args_dict = {k: args_dict[k] for k in ['part_geom', 'part_dim', 'jet_geom', 'jet_dim','equal_heads','PM_weight_initialization_factor','att_metric','inter_man_att','inter_man_att_method','base_resid_agg','base_activations','remove_pm_norm_layers'] if k in args_dict}
+    filtered_args_dict = {k: args_dict[k] for k in ['part_geom', 'part_dim','part_curvature_init', 'jet_geom', 'jet_dim','jet_curvature_init','equal_heads','PM_weight_initialization_factor','att_metric','inter_man_att','inter_man_att_method','base_resid_agg','base_activations','remove_pm_norm_layers'] if k in args_dict}
 
     # Merge dictionaries
     combined_options = {**network_options, **filtered_args_dict}
@@ -1000,7 +1000,7 @@ def _main(args):
             return
         
         
-        output_metric_dir = args.data_config.split('/')[1]+f'_perf_{args.dev_id}'
+        output_metric_dir = args.data_config.split('/')[1]+f'_performance_summary_{args.dev_id}'
         try:
             os.makedirs(output_metric_dir)
         except OSError:
@@ -1106,8 +1106,8 @@ def _main(args):
                 is_best_epoch = valid_metric < best_valid_metric
             else:
                 is_best_epoch = valid_metric > best_valid_metric
-                if valid_metric < 0.60 and last_valid_metric <0.60:
-                    break
+                # if valid_metric < 0.60 and last_valid_metric <0.60:
+                #     break
             if is_best_epoch:
                 best_valid_metric = valid_metric
                 if args.model_prefix and (args.backend is None or local_rank == 0):
