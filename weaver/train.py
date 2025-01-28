@@ -1000,7 +1000,7 @@ def _main(args):
             return
         
         
-        output_metric_dir = args.data_config.split('/')[1]+f'_performance_summary_{args.dev_id}'
+        output_metric_dir = args.data_config.split('/')[1]+f'_perf_{args.dev_id}'
         try:
             os.makedirs(output_metric_dir)
         except OSError:
@@ -1014,7 +1014,7 @@ def _main(args):
             output_file_path = os.path.join(output_metric_dir, f"{output_file_name}_embedding_performance.csv")
         from datetime import datetime
         current_datetime = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_file_path = os.path.join(output_metric_dir, f"{output_file_name}_performance_{current_datetime}.csv")
+        output_file_path = os.path.join(output_metric_dir, f"{output_file_name}_{current_datetime}.csv")
         args.output_file_path = output_file_path
         
         
