@@ -157,15 +157,16 @@ parser.add_argument('--cross-validation', type=str, default=None,
                     help='enable k-fold cross validation; input format: `variable_name%%k`')
 parser.add_argument('--part-geom', type=str, default=None,
                     help='particle geometry for PM Transformer; input format: `H`,`R`,`S`, or PM such as `HxR`')
-parser.add_argument('--part-dim', type=int, default=0,
-                    help='dimension for each manifold in particle-level reperesentation')
+parser.add_argument('--part-dim', type=str, default=None,
+                    help='dimension for each manifold in particle-level reperesentation passed in as dim1,dim2,...,dimN')
+parser.add_argument('--part-curvature-init', type=str, default=None,
+                    help='initial curvature for each manifold in particle-level reperesentation passed in as curv1,curv2,...,curvN')
 parser.add_argument('--jet-geom', type=str, default=None,
                     help='jet geometry for PM Transformer; input format: `H`,`R`,`S`, or PM such as `HxR`')
-parser.add_argument('--jet-dim', type=int, default=0,
-                    help='dimension for each manifold in jet-level reperesentation')
-parser.add_argument('--equal-heads', action='store_true', default=False,
-                    help='If true, will enforce split number of normal transformer heads across PM representation equally. If false, each representation is given the default number of heads')
-
+parser.add_argument('--jet-dim', type=str, default=None,
+                    help='dimension for each manifold in jet-level reperesentation passed in as dim1,dim2,...,dimN')
+parser.add_argument('--jet-curvature-init', type=str, default=None,
+                    help='initial curvature for each manifold in jet-level reperesentation passed in as curv1,curv2,...,curvN')
 parser.add_argument('--PM-weight-initialization-factor', type=float, default=1,
                     help='Factor to initialize non-Euclidean weights relative to Euclidean')
 parser.add_argument('--dev-id',  type=str, default='NA',
