@@ -248,7 +248,7 @@ class Embed(nn.Module):
                 nn.LayerNorm(input_dim),
                 nn.Linear(input_dim, dim),
                 nn.GELU() if activation == 'gelu' else nn.ReLU(),
-            ])
+                            ])  
             input_dim = dim
         self.embed = nn.Sequential(*module_list)
 
@@ -266,14 +266,15 @@ class PMNN(nn.Module):
 
     def __init__(self,
                  input_dim,
-                 num_classes=None,
+                 num_classes=2,
                  # network configurations
                  pair_input_dim=4,
                  pair_extra_dim=0,
                  remove_self_pair=False,
                  use_pre_activation_pair=True,
                  part_geom = 'R',
-                 part_dim = 16,
+                 part_dim = '64',
+                 part_curvature_init = [0],
                  jet_geom = None,
                  jet_dim = None,
                  activation='relu',
@@ -282,75 +283,60 @@ class PMNN(nn.Module):
                  trim=True,
                  for_inference=False,
                  use_amp=False,
+                 dropout_rate=0.1,
+                 use_bias= True,
+                 learnable = True,
                  **kwargs) -> None:
         super().__init__()
 
-        
-        
+        parts = part_geom.split('x') if 'x' in part_geom else [part_geom]
+        part_dim = [int(x) for x in part_dim.split(',')]
+        part_curvature_init = [float(x) for x in part_curvature_init.split(',')]
+
         self.r = 0.6
         self.part_manifolds = nn.ModuleList()
         parts = part_geom.split('x') if 'x' in part_geom else [part_geom]
-        embed_dims = [part_dim, part_dim, part_dim] #embed_dims=[128, 512, 128]
-        self.act = nn.ReLU()
         
+
+        self.act = nn.ReLU()
         self.n_man = len(parts)
-        n_flat = 0
-        n_hyp = 0
-        n_sphere = 0
+        
         for i, m in enumerate(parts):
             if m == 'R':
                 self.part_manifolds.append(geoopt.Euclidean())
             elif m == 'H':
-                self.part_manifolds.append(geoopt.PoincareBallExact(c=1.2*2**(n_hyp), learnable=True))
-                n_hyp += 1
+                self.part_manifolds.append(geoopt.PoincareBallExact(c=part_curvature_init[i], learnable=learnable))
             elif m == 'S':
-                self.part_manifolds.append(geoopt.SphereProjectionExact(k=1.0*2**(n_sphere), learnable=True))
-                n_sphere += 1
+                self.part_manifolds.append(geoopt.SphereProjectionExact(k=part_curvature_init[i], learnable=learnable))
+            # Full interpolation between +/-
+            elif m == 'M':
+                self.part_manifolds.append(geoopt.StereographicExact(k=part_curvature_init[i], learnable=learnable))
                 
         self.layer_norms = nn.ModuleList()
-        
         self.fc1 = nn.ModuleList()
         if self.n_man > 1:
             self.w_man_att = nn.ModuleList()
             self.theta_man_att = nn.ModuleList()
-        dim_dif = part_dim - input_dim
-        for man in self.part_manifolds:
-            self.layer_norms.append(nn.LayerNorm(part_dim))
-            if man.name =='Euclidean':
-                self.fc1.append(nn.Sequential(
-                    Manifold_Linear(input_dim, int(input_dim + dim_dif*0.5),ball = man,weight_init_ratio = PM_weight_initialization_factor),
-                    nn.ReLU(),
-                    Manifold_Linear(int(input_dim + dim_dif*0.5), int(input_dim + dim_dif*0.75),ball = man,weight_init_ratio = PM_weight_initialization_factor),
-                    nn.ReLU(),
-                    Manifold_Linear(int(input_dim + dim_dif*0.75), part_dim,ball = man,weight_init_ratio = PM_weight_initialization_factor)))
-                
-            elif man.name =='SphereProjectionExact':
-                self.fc1.append(nn.Sequential(
-                    Manifold_Linear(input_dim, int(input_dim + dim_dif*0.5),ball = man,weight_init_ratio = PM_weight_initialization_factor),
-                    Mob_Act(nn.ReLU(), man),
-                    Manifold_Linear(int(input_dim + dim_dif*0.5), int(input_dim + dim_dif*0.75), ball = man,weight_init_ratio = PM_weight_initialization_factor),
-                    Mob_Act(nn.ReLU(), man),
-                    Manifold_Linear(int(input_dim + dim_dif*0.75), part_dim,ball = man,weight_init_ratio = PM_weight_initialization_factor)
-                                   ))
-            else:
-                self.fc1.append(nn.Sequential(
-                    Manifold_Linear(input_dim, int(input_dim + dim_dif*0.5),ball = man,weight_init_ratio = PM_weight_initialization_factor),
-                    nn.ReLU(),
-                    Manifold_Linear(int(input_dim + dim_dif*0.5), int(input_dim + dim_dif*0.75), ball = man,weight_init_ratio = PM_weight_initialization_factor),
-                    nn.ReLU(),
-                    Manifold_Linear(int(input_dim + dim_dif*0.75), part_dim,ball = man,weight_init_ratio = PM_weight_initialization_factor)
-                                   ))
-                                                   
+
+        # in_features, out_features,manifold, c, dropout, act, use_bias
+        for i,man in enumerate(self.part_manifolds):
+            dim_dif = part_dim[i] - input_dim
+            self.layer_norms.append(nn.LayerNorm(input_dim))
+            self.fc1.append(nn.Sequential(
+                ManifoldNNLayer(input_dim, int(input_dim + dim_dif*0.5),man,man.k, dropout_rate, self.act, use_bias),
+                ManifoldNNLayer(int(input_dim + dim_dif*0.5), int(input_dim + dim_dif*0.75),man,man.k, dropout_rate, self.act, use_bias),
+                ManifoldNNLayer(int(input_dim + dim_dif*0.75), part_dim[i],man,man.k, dropout_rate, self.act, use_bias)))
+                                  
             if self.n_man > 1:
-                self.w_man_att.append(Manifold_Linear(part_dim, part_dim ,ball = man))
-                self.theta_man_att.append(nn.Linear(part_dim, 1))
+                self.w_man_att.append(ManifoldLinear(part_dim[i], part_dim[i] ,manifold = man))
+                self.theta_man_att.append(nn.Linear(part_dim[i], 1))
         
 
         self.n_part_man = len(self.part_manifolds)
         self.trimmer = SequenceTrimmer(enabled=trim and not for_inference)
         self.for_inference = for_inference
         self.use_amp = use_amp
-        self.final_fc = nn.Sequential(nn.Linear(part_dim*self.n_man, num_classes),
+        self.final_fc = nn.Sequential(nn.Linear(part_dim[0]*self.n_man, num_classes),
                                       nn.ReLU(),
                                       nn.Linear(num_classes, num_classes))
 
@@ -372,16 +358,18 @@ class PMNN(nn.Module):
         with torch.cuda.amp.autocast(enabled=self.use_amp):
             pm_x = []
             for i,man in enumerate(self.part_manifolds):
-                pm_x.append(man.expmap0(x))
+                pm_x.append(man.expmap0(self.layer_norms[i](x)))
                 
             output = []
             for i, man in enumerate(self.part_manifolds):
                 x = pm_x[i]
                 x = self.fc1[i](x)
-                if man.name != 'Euclidean':
-                    x = man.expmap0(self.layer_norms[i](man.logmap0(x)))
-                else:
-                    x = self.layer_norms[i](x) 
+
+                # if man.name != 'Euclidean':
+                #     x = man.expmap0(self.layer_norms[i](man.logmap0(x)))
+                # else:
+                #     x = self.layer_norms[i](x) 
+
                 output.append(x)
             
             if self.n_man > 1:
@@ -400,9 +388,9 @@ class PMNN(nn.Module):
                 curv = self.part_manifolds[0].k if self.part_manifolds[0].name != 'Euclidean' else 0
                 return proc_jets[0], self.part_manifolds[i].logmap0(proc_jets[0]), curv
             
-            output = [torch.mean(self.part_manifolds[i].logmap0(proc_jets[i]),dim = 1) for i in range(self.n_man)]
-
-            output = torch.cat(output,dim=-1)
+            output = [self.part_manifolds[i].logmap0(proc_jets[i]) for i in range(self.n_man)]
+            
+            output = torch.cat(output, dim=-1)
 
             output = self.final_fc(output)
             

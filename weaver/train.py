@@ -1167,7 +1167,7 @@ def _main(args):
                         model, test_loader, dev, epoch=None, for_training=False, tb_helper=tb, args = args, name = name)
                     _logger.info('Test metric %.5f' % test_metric, color='bold')
             del test_loader
-
+            
             if args.predict_output:
                 if not os.path.dirname(args.predict_output):
                     predict_output = os.path.join(

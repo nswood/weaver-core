@@ -833,10 +833,15 @@ class PMTransformer(nn.Module):
             else:
                 self.part_embedding.append(nn.Sequential(Manifold_Linear(input_dim, part_dim[i], ball = man,weight_init_ratio = PM_weight_initialization_factor)))
         self.blocks = nn.ModuleList()
+
+
         for i in range(num_layers):
-            
+
+            if num_layers < 3 and i == 0:
+                cfg_block['man_att'] = True
+                print('Adding intermanifold attention')
             # if inter_man_att is greater than 0, set man_att based on layers
-            if inter_man_att > 0:
+            elif inter_man_att > 0:
                 cfg_block['man_att'] = (i != 0 and i % inter_man_att == 0)
 
             # if inter_man_att is 0, apply man_att to all hidden layers (i.e., layers except the first and last)
@@ -877,37 +882,26 @@ class PMTransformer(nn.Module):
                     act = None
                 fcs = []
                 in_dim = total_part_dim
-                self.jet_fc.append(nn.Sequential(
-                            nn.Linear(in_dim, in_dim + int(dim_dif*0.5)), nn.ReLU(),
-                            nn.Linear(in_dim + int(dim_dif*0.5), in_dim + int(dim_dif*0.75)),
-                            nn.ReLU(),
-                            nn.Linear(in_dim + int(dim_dif*0.75), jet_dim[i]),
-                            nn.ReLU()))
+                self.jet_fc.append(nn.Sequential(nn.Linear(in_dim, jet_dim[i])))
                 
                 if act is not None :
                     if man.name == 'Euclidean':
                         self.jet_man_fc.append(nn.Sequential(
                             nn.Linear(jet_dim[i], jet_dim[i]), 
-                            act,
-                            nn.Linear(jet_dim[i], jet_dim[i])
+                            act
                         ))
                     else:
                         self.jet_man_fc.append(nn.Sequential(
                             Manifold_Linear(jet_dim[i], jet_dim[i], ball=man, weight_init_ratio=PM_weight_initialization_factor), 
-                            act,
-                            Manifold_Linear(jet_dim[i], jet_dim[i], ball=man, weight_init_ratio=PM_weight_initialization_factor)
+                            act
                         ))
                 else:
                     if man.name == 'Euclidean':
                         self.jet_man_fc.append(nn.Sequential(
-                            nn.Linear(jet_dim[i], jet_dim[i]), 
-                           
                             nn.Linear(jet_dim[i], jet_dim[i])
                         ))
                     else:
                         self.jet_man_fc.append(nn.Sequential(
-                            Manifold_Linear(jet_dim[i], jet_dim[i], ball=man, weight_init_ratio=PM_weight_initialization_factor), 
-                          
                             Manifold_Linear(jet_dim[i], jet_dim[i], ball=man, weight_init_ratio=PM_weight_initialization_factor)
                         ))
                 if self.n_jet_man > 1:
@@ -918,8 +912,8 @@ class PMTransformer(nn.Module):
 
 
             post_jet_dim = sum(jet_dim)
-            self.final_fc = nn.Sequential(nn.Linear(post_jet_dim, post_jet_dim), nn.ReLU(),
-                                          nn.Linear(post_jet_dim, post_jet_dim), nn.ReLU(),
+            self.final_fc = nn.Sequential(nn.Linear(post_jet_dim, post_jet_dim), 
+                                          nn.ReLU(),
                                           nn.Linear(post_jet_dim, num_classes))
             
         else:

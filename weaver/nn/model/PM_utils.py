@@ -2,47 +2,20 @@
 Paper: "Product Manifold Machine Learning for Physics" - https://arxiv.org/abs/2412.07033
 '''
 
-import sys
-import matplotlib.pyplot as plt
 import geoopt
 from geoopt.layers.stereographic import Distance2StereographicHyperplanes
 from geoopt.manifolds.stereographic.math import arsinh, artanh,artan_k
-from typing import List, Optional, Tuple, Union
-
     
-import numpy as np
 import torch
 torch.set_default_dtype(torch.float64)
 
 import torch.nn as nn
 import torch.nn.init as init
-import itertools
-import time
-from weaver.utils.logger import _logger
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-
-
-
 import torch.nn.functional as F
-from transformers.models.bert.modeling_bert import ACT2FN, BertSelfAttention#, prune_linear_layer#, gelu_new
-import tqdm
 import math
-from scipy.special import beta
-
-
-from geoopt.manifolds.stereographic.math import mobius_fn_apply
-
-  
-class Mob_Act(nn.Module):
-    def __init__(self,fn, man):
-        super().__init__()
-        self.fn = fn
-        self.man = man
-
-    def forward(self, x):
-        return self.man.expmap0(self.fn(self.man.logmap0(x)))
     
 class Mob_Res_Midpoint(nn.Module):
     def __init__(self, man):
@@ -56,59 +29,81 @@ class Mob_Res_Midpoint(nn.Module):
         mid = self.man.mobius_scalar_mul(torch.tensor(0.5),t1)
         return mid
 
+# Adapted from Mixed-Curvature Product Space GCN
 
-
-
-# Naive Manifold_Linear
-class Manifold_Linear(nn.Module):
-    def __init__(self, in_features, out_features, ball, bias=True, weight_init_ratio = 1):
-        super(Manifold_Linear, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.ball = ball
-        self.weight_init_ratio = weight_init_ratio
-        self.weight = nn.parameter.Parameter(torch.Tensor(out_features,in_features,))
-        
-#         self.weight = geoopt.ManifoldParameter(torch.Tensor(out_features,in_features,),manifold=self.ball)
-        self.__params__ = self.in_features* self.out_features        
-        
-        if bias:
-            self.bias = geoopt.ManifoldParameter(torch.Tensor(out_features), manifold=self.ball)
-            self.__params__ += out_features
-        else:
-            self.register_parameter("bias", None)
-        self.reset_parameters()
-        
-    
-    def reset_parameters(self):
-        
-        init.kaiming_uniform_(self.weight, a=0.001 * self.weight_init_ratio)
-            
-        if self.bias is not None:
-            fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
-            bound = 1 / math.sqrt(fan_in)
-            init.uniform_(self.bias, -bound, bound)
+class ManifoldNNLayer(nn.Module):
+    """
+    Manifold neural networks layer.
+    """
+    def __init__(self, in_features, out_features,manifold, c, dropout, act, use_bias):
+        super().__init__()
+        self.linear = ManifoldLinear(manifold, in_features, out_features, c, dropout, use_bias)
+        self.hyp_act = ManifoldAct(manifold, act)
 
     def forward(self, x):
-        
-        mv = self.ball.mobius_matvec(self.weight, x)
-        
-        if self.bias is not None:
-            mv = self.ball.mobius_add(mv, self.bias)
-        return self.ball.projx(mv)
+        h = self.linear.forward(x)
+        h = self.hyp_act.forward(h)
+        return h
 
+class ManifoldLinear(nn.Module):
+    """
+    Manifold linear layer.
+    """
+    def __init__(self,manifold,  in_features, out_features, c, dropout, use_bias):
+        super().__init__()
+        self.manifold = manifold
+        self.in_features = in_features
+        self.out_features = out_features
+        self.c = c
+        self.dropout = dropout
+        self.use_bias = use_bias
+        self.bias = nn.Parameter(torch.Tensor(out_features))
+        self.weight = nn.Parameter(torch.Tensor(out_features, in_features))
+        self.reset_parameters()
 
+    def reset_parameters(self):
+        init.xavier_uniform_(self.weight, gain=math.sqrt(2))
+        init.constant_(self.bias, 0)
+
+    def forward(self, x):
+        drop_weight = F.dropout(self.weight, self.dropout, training=self.training)
+        mv = self.manifold.mobius_matvec(drop_weight, x)
+        res = self.manifold.proj(mv)
+        if self.use_bias: 
+            man_bias = self.manifold.expmap0(self.bias)
+            man_bias = self.manifold.proj(man_bias)
+            res = self.manifold.mobius_add(res, man_bias)
+            res = self.manifold.proj(res)
+        return res
+        
     def extra_repr(self):
-        return "in_features={}, out_features={}, bias={}, c={}".format(
-            self.in_features, self.out_features, self.bias is not None, self.ball
+        return 'in_features={}, out_features={}, c={}'.format(
+            self.in_features, self.out_features, self.c
         )
 
+class ManifoldAct(nn.Module):
+    """
+    Hyperbolic activation layer.
+    """
+    def __init__(self, manifold, act):
+        super().__init__()
+        self.manifold = manifold
+        self.act = act
 
+    def forward(self, x):
+        xt = self.act(self.manifold.logmap0(x))
+        exp = self.manifold.expmap0(xt)
+        return self.manifold.proj(exp)
+
+    def extra_repr(self):
+        return 'c_in={}, c_out={}'.format(
+            self.c_in, self.c_out
+        )
     
 class ManifoldMHA(nn.Module):
-    def __init__(self,hidden_size, num_attention_heads,  dropout,ball, weight_init_ratio = 1, att_metric = 'dist'):
+    def __init__(self,hidden_size, num_attention_heads,  dropout,manifold, weight_init_ratio = 1, att_metric = 'dist'):
         super().__init__()
-        self.ball = ball
+        self.manifold = manifold
         self.num_attention_heads = num_attention_heads
         self.attention_head_size = int(hidden_size / num_attention_heads)
         self.all_head_size = self.num_attention_heads * self.attention_head_size
@@ -121,24 +116,20 @@ class ManifoldMHA(nn.Module):
         self.att_metric = att_metric
         
 #         print(att_metric)
-        if ball.name == 'Euclidean':
+        if manifold.name == 'Euclidean':
             self.query = nn.Linear(hidden_size, hidden_size)
             self.key = nn.Linear(hidden_size, hidden_size)
             self.value = nn.Linear(hidden_size, hidden_size)
 
         else:
-            self.query = Manifold_Linear(hidden_size, hidden_size, ball=self.ball, weight_init_ratio = weight_init_ratio)
-            self.key = Manifold_Linear(hidden_size, hidden_size, ball=self.ball, weight_init_ratio = weight_init_ratio)
-            self.value = Manifold_Linear(hidden_size, hidden_size, ball=self.ball, weight_init_ratio = weight_init_ratio)
+            self.query = ManifoldLinear(hidden_size, hidden_size, self.manifold,manifold.c, dropout, False)
+            self.key = ManifoldLinear(hidden_size, hidden_size, self.manifold,manifold.c, dropout, False)
+            self.value = ManifoldLinear(hidden_size, hidden_size, self.manifold,manifold.c, dropout, False)
 
         self.dropout = nn.Dropout(dropout)
         self.sigmoid_fn = nn.Sigmoid()
         self.softmax_fn = nn.Softmax(dim =-2)
-        
-        self.beta_ni = beta(self.attention_head_size / 2, 1 / 2)
-        self.beta_n = beta(self.hidden_size / 2, 1 / 2)
-        
-        self.is_flat = ball.name == 'Euclidean'
+        self.is_flat = manifold.name == 'Euclidean'
    
 
 
@@ -160,7 +151,6 @@ class ManifoldMHA(nn.Module):
         query = query.permute(1,0,2)
         key = key.permute(1,0,2)
         value = value.permute(1,0,2)
-#         print(key.shape)
         
         #Shape: # Batch x Parts x Embed
         query_parts = query.size(1)
@@ -169,25 +159,19 @@ class ManifoldMHA(nn.Module):
         mixed_key_layer = self.key(key)
         mixed_value_layer = self.value(value)
         
-        query_layer = self.ball.logmap0(mixed_query_layer)
-        key_layer = self.ball.logmap0(mixed_key_layer)
-        value_layer = self.ball.logmap0(mixed_value_layer)
-        
-        if not self.is_flat: 
-            query_layer = query_layer*self.beta_ni/self.beta_n
-            key_layer = key_layer*self.beta_ni/self.beta_n
-            value_layer = value_layer*self.beta_ni/self.beta_n
-                
-        key_layer = key_layer.view(-1, self.num_attention_heads, nparts, self.attention_head_size)
-        query_layer = query_layer.view(-1, self.num_attention_heads, query_parts, self.attention_head_size)
-        value_layer = value_layer.view(-1, self.num_attention_heads, nparts, self.attention_head_size)
-        
-        query_layer = self.ball.expmap0(query_layer)
-        key_layer = self.ball.expmap0(key_layer)
-        value_layer = self.ball.expmap0(value_layer)
-        
-       
-        
+
+        if self.num_attention_heads > 1:
+            query_layer = self.manifold.logmap0(mixed_query_layer)
+            key_layer = self.manifold.logmap0(mixed_key_layer)
+            value_layer = self.manifold.logmap0(mixed_value_layer)
+                    
+            key_layer = key_layer.view(-1, self.num_attention_heads, nparts, self.attention_head_size)
+            query_layer = query_layer.view(-1, self.num_attention_heads, query_parts, self.attention_head_size)
+            value_layer = value_layer.view(-1, self.num_attention_heads, nparts, self.attention_head_size)
+            
+            query_layer = self.manifold.expmap0(query_layer)
+            key_layer = self.manifold.expmap0(key_layer)
+            value_layer = self.manifold.expmap0(value_layer)
         
         # Distance pairwise distance calculation for attention scores using hyperbolic distance
         if self.is_flat:
@@ -197,20 +181,17 @@ class ManifoldMHA(nn.Module):
 
         else:
             key_layer_transposed = key_layer.transpose(-1, -2)
-#             Euclidean_attention_scores = torch.matmul(query_layer, key_layer_transposed)
-#             scalings = self.ball.lambda_x(query_layer).unsqueeze(-1)**2
-#             attention_scores = Euclidean_attention_scores*scalings
             # distance based attention 
+            
             if self.att_metric == 'dist':
-                t1 = self.ball.mobius_add(-query_layer.unsqueeze(-2), key_layer.unsqueeze(-2).transpose(2, 3)).norm(dim=-1, p=2)
-                dist = 2.0 * artan_k(t1, k=self.ball.k)
+                t1 = self.manifold.mobius_add(-query_layer.unsqueeze(-2), key_layer.unsqueeze(-2).transpose(2, 3)).norm(dim=-1, p=2)
+                dist = 2.0 * artan_k(t1, k=self.manifold.k)
                 attention_scores = -1 * dist 
+                
             elif self.att_metric == 'tan_space':
                 key_layer_transposed = key_layer.transpose(-1, -2)
-                attention_scores = torch.matmul(self.ball.logmap0(query_layer), self.ball.logmap0(key_layer_transposed))
+                attention_scores = torch.matmul(self.manifold.logmap0(query_layer), self.manifold.logmap0(key_layer_transposed))
                 attention_scores =  attention_scores / self.scaling_factor
-#         if torch.isnan(attention_scores).any():
-#             print(f"Nan post att scores")
 
         
         # Apply the key_padding_mask if provided
@@ -233,22 +214,62 @@ class ManifoldMHA(nn.Module):
         if self.is_flat:
             context_layer = torch.matmul(attention_probs, value_layer)
         else:
-            context_layer = self.ball.weighted_midpoint(value_layer, weights=attention_probs, reducedim=[-1], parts=query_parts, dim =-1,posweight = True)
-        
-#         if torch.isnan(context_layer).any():
-#             print(f"Nan post context layer")
-        
+            context_layer = self.manifold.weighted_midpoint(value_layer, weights=attention_probs, reducedim=[-1], parts=query_parts, dim =-1,posweight = True)
+    
+        context_layer = self.manifold.proj(context_layer)
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
-        context_layer = self.ball.logmap0(context_layer)
-        
-        if not self.is_flat: 
-            context_layer = context_layer*self.beta_n/self.beta_ni
+        context_layer = self.manifold.logmap0(context_layer)
             
         context_layer = context_layer.view(new_context_layer_shape)
-        context_layer = self.ball.expmap0(context_layer)
+        context_layer = self.manifold.expmap0(context_layer)
         context_layer = context_layer.permute(1,0,2)
         
         
         return context_layer, attention_probs
 
+
+
+# Naive Manifold_Linear
+# class Manifold_Linear(nn.Module):
+#     def __init__(self, in_features, out_features, manifold, bias=True, weight_init_ratio = 1):
+#         super(Manifold_Linear, self).__init__()
+#         self.in_features = in_features
+#         self.out_features = out_features
+#         self.manifold = manifold
+#         self.weight_init_ratio = weight_init_ratio
+#         self.weight = nn.parameter.Parameter(torch.Tensor(out_features,in_features,))
+        
+# #         self.weight = geoopt.ManifoldParameter(torch.Tensor(out_features,in_features,),manifold=self.manifold)
+#         self.__params__ = self.in_features* self.out_features        
+        
+#         if bias:
+#             self.bias = geoopt.ManifoldParameter(torch.Tensor(out_features), manifold=self.manifold)
+#             self.__params__ += out_features
+#         else:
+#             self.register_parameter("bias", None)
+#         self.reset_parameters()
+        
+    
+#     def reset_parameters(self):
+        
+#         init.kaiming_uniform_(self.weight, a=0.001 * self.weight_init_ratio)
+            
+#         if self.bias is not None:
+#             fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
+#             bound = 1 / math.sqrt(fan_in)
+#             init.uniform_(self.bias, -bound, bound)
+
+#     def forward(self, x):
+        
+#         mv = self.manifold.mobius_matvec(self.weight, x)
+        
+#         if self.bias is not None:
+#             mv = self.manifold.mobius_add(mv, self.bias)
+#         return self.manifold.projx(mv)
+
+
+#     def extra_repr(self):
+#         return "in_features={}, out_features={}, bias={}, c={}".format(
+#             self.in_features, self.out_features, self.bias is not None, self.manifold
+#         )
